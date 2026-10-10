@@ -210,11 +210,11 @@ class Deployment(Base, UUIDMixin, TimestampMixin):
     @property
     def url(self) -> str | None:
         """Where the app answers, once it has a subdomain."""
-        from app.config import settings
+        from app.runtime.naming import url_for
 
         if not self.subdomain:
             return None
-        return f"http://{self.subdomain}.{settings.app_domain}"
+        return url_for(self.subdomain)
 
     def __repr__(self) -> str:
         return f"<Deployment {self.id} status={self.status.value}>"

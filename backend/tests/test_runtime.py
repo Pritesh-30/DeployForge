@@ -208,6 +208,60 @@ async def test_the_routing_table_requires_the_shared_token(client):
     assert res.status_code == 403
 
 
+@pytest.mark.asyncio
+async def test_with_a_certificate_resolver_apps_are_served_over_https(
+    client, db_session, user_credentials, monkeypatch
+):
+    monkeypatch.setattr(settings, "tls_cert_resolver", "le")
+    res = await client.post("/auth/signup", json=user_credentials)
+    user_id = uuid.UUID(res.json()["user"]["id"])
+    deployment, _ = await _running_deployment(db_session, user_id)
+
+    res = await client.get(
+        "/internal/traefik/config", params={"token": settings.traefik_provider_token}
+    )
+    router = res.json()["http"]["routers"]["todo-abc123"]
+
+    assert router["entryPoints"] == [internal_routes.WEBSECURE_ENTRYPOINT]
+    assert router["tls"] == {"certResolver": "le"}
+    # The URL a student is shown must match what the router serves.
+    assert deployment.url == f"https://todo-abc123.{settings.app_domain}"
+
+
+def test_without_a_certificate_resolver_urls_stay_plain_http(monkeypatch):
+    monkeypatch.setattr(settings, "tls_cert_resolver", "")
+    assert naming.url_for("todo-abc123") == f"http://todo-abc123.{settings.app_domain}"
+
+
+@pytest.mark.asyncio
+async def test_the_console_and_api_are_routed_only_when_configured(
+    client, monkeypatch
+):
+    params = {"token": settings.traefik_provider_token}
+
+    monkeypatch.setattr(settings, "console_host", "")
+    monkeypatch.setattr(settings, "api_host", "")
+    routers = (await client.get("/internal/traefik/config", params=params)).json()[
+        "http"
+    ]["routers"]
+    assert internal_routes.CONSOLE_NAME not in routers
+    assert internal_routes.API_NAME not in routers
+
+    monkeypatch.setattr(settings, "console_host", "console.20-1-2-3.sslip.io")
+    monkeypatch.setattr(settings, "api_host", "api.20-1-2-3.sslip.io")
+    config = (await client.get("/internal/traefik/config", params=params)).json()[
+        "http"
+    ]
+    assert (
+        config["routers"][internal_routes.API_NAME]["rule"]
+        == "Host(`api.20-1-2-3.sslip.io`)"
+    )
+    api_server = config["services"][internal_routes.API_NAME]["loadBalancer"][
+        "servers"
+    ][0]
+    assert api_server["url"] == settings.api_upstream
+
+
 # --- Quota ------------------------------------------------------------------
 
 @pytest.mark.asyncio

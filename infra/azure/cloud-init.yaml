@@ -1,0 +1,27 @@
+#cloud-config
+# First boot of the DeployForge server: Docker, a swap file, and the
+# directories the platform writes to. The platform itself is installed by
+# infra/deploy.sh, so no secret ever passes through VM metadata.
+
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - python3
+
+runcmd:
+  # Docker Engine + compose plugin from Docker's own repository.
+  - curl -fsSL https://get.docker.com | sh
+  - usermod -aG docker azureuser
+  - systemctl enable --now docker
+  # A small VM runs out of memory during builds long before it runs out of
+  # CPU; swap turns an OOM-killed build into a slow one.
+  - fallocate -l 4G /swapfile
+  - chmod 600 /swapfile
+  - mkswap /swapfile
+  - swapon /swapfile
+  - echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  - mkdir -p /opt/deployforge /var/lib/deployforge
+  - chown azureuser:azureuser /opt/deployforge
+  # Let infra/deploy.sh know first boot has finished.
+  - touch /opt/deployforge/.provisioned

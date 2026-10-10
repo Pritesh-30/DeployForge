@@ -69,4 +69,4 @@ def container_name_for(deployment_id: uuid.UUID) -> str:
 
 def url_for(subdomain: str) -> str:
     """The browser-facing URL for a subdomain."""
-    return f"http://{subdomain}.{settings.app_domain}"
+    return f"{settings.app_scheme}://{subdomain}.{settings.app_domain}"

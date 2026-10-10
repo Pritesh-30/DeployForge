@@ -97,6 +97,18 @@ class Settings(BaseSettings):
     router_container: str = "deployforge-traefik"
     # Shared secret the router presents when polling for its configuration.
     traefik_provider_token: str = "deployforge-internal"
+    # The Traefik certificate resolver that issues HTTPS certificates. Empty =
+    # plain HTTP, which is what a laptop wants: Let's Encrypt cannot reach
+    # `*.localhost`, so asking it for a certificate would only fail.
+    tls_cert_resolver: str = ""
+    # Hostnames the platform itself answers on when it runs behind the same
+    # router as the apps (see docker-compose.yml). Empty = not routed, as when
+    # the backend and frontend run straight on the host during development.
+    console_host: str = ""
+    api_host: str = ""
+    # Where the router reaches them over the shared network.
+    console_upstream: str = "http://frontend:3000"
+    api_upstream: str = "http://backend:8000"
 
     # --- Per-app resource limits ---
     # A student's app must not be able to take the machine down.
@@ -124,6 +136,11 @@ class Settings(BaseSettings):
         """Registry host with a trailing separator, or "" when pushing is off."""
         host = self.registry_host.strip().rstrip("/")
         return f"{host}/" if host and self.registry_push else ""
+
+    @property
+    def app_scheme(self) -> str:
+        """`https` once a certificate resolver is configured, else `http`."""
+        return "https" if self.tls_cert_resolver.strip() else "http"
 
     @property
     def is_development(self) -> bool:

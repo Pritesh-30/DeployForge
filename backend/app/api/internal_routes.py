@@ -32,11 +32,45 @@ router = APIRouter(prefix="/internal", tags=["internal"], include_in_schema=Fals
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 
-# Traefik's entrypoint name for plain HTTP, as configured on the container.
+# Traefik's entrypoint names, as configured on the container: plain HTTP, and
+# HTTPS for when a certificate resolver is configured.
 WEB_ENTRYPOINT = "web"
+WEBSECURE_ENTRYPOINT = "websecure"
 
 # Keeps the returned configuration non-empty. See the note in `traefik_config`.
 SENTINEL_NAME = "deployforge-sentinel"
+
+# Router names for the platform's own console and API. Not valid subdomains
+# (an app's always ends in a six-character id), so they cannot collide.
+CONSOLE_NAME = "deployforge-console"
+API_NAME = "deployforge-api"
+
+
+def _router(host: str, service: str) -> dict:
+    """
+    A route for one hostname.
+
+    With a certificate resolver configured it listens on HTTPS and Traefik
+    obtains the certificate on the first request; HTTP is redirected to it by
+    the entrypoint itself, so there is no plain-HTTP route to forget.
+    """
+    resolver = settings.tls_cert_resolver.strip()
+    if not resolver:
+        return {
+            "rule": f"Host(`{host}`)",
+            "service": service,
+            "entryPoints": [WEB_ENTRYPOINT],
+        }
+    return {
+        "rule": f"Host(`{host}`)",
+        "service": service,
+        "entryPoints": [WEBSECURE_ENTRYPOINT],
+        "tls": {"certResolver": resolver},
+    }
+
+
+def _service(url: str) -> dict:
+    return {"loadBalancer": {"servers": [{"url": url}], "passHostHeader": True}}
 
 
 def _authorize(token: str | None) -> None:
@@ -80,27 +114,24 @@ async def traefik_config(
 
     for deployment in rows:
         name = deployment.subdomain
-        host = f"{name}.{settings.app_domain}"
-        routers[name] = {
-            "rule": f"Host(`{host}`)",
-            "service": name,
-            "entryPoints": [WEB_ENTRYPOINT],
-        }
-        services[name] = {
-            "loadBalancer": {
-                # Reached by container name over the shared network: Docker's
-                # embedded DNS resolves it, so no host port is published and no
-                # container IP has to be tracked as it changes on restart.
-                "servers": [
-                    {
-                        "url": (
-                            f"http://{deployment.container_name}:{deployment.app_port}"
-                        )
-                    }
-                ],
-                "passHostHeader": True,
-            }
-        }
+        routers[name] = _router(f"{name}.{settings.app_domain}", name)
+        # Reached by container name over the shared network: Docker's embedded
+        # DNS resolves it, so no host port is published and no container IP
+        # has to be tracked as it changes on restart.
+        services[name] = _service(
+            f"http://{deployment.container_name}:{deployment.app_port}"
+        )
+
+    # The platform's own console and API, when they sit behind this router
+    # too. Served from here rather than a config file so that one endpoint is
+    # the whole routing table.
+    for name, host, upstream in (
+        (CONSOLE_NAME, settings.console_host, settings.console_upstream),
+        (API_NAME, settings.api_host, settings.api_upstream),
+    ):
+        if host.strip():
+            routers[name] = _router(host.strip(), name)
+            services[name] = _service(upstream)
 
     # A configuration is never returned empty, and this is the reason:
     #

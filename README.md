@@ -311,6 +311,62 @@ Tests run against the real database inside transactions that roll back, so they
 leave no rows behind. Docker and GitHub are stubbed; nothing is built, run or
 fetched.
 
+CI (`.github/workflows/ci.yml`) runs the same tests against a fresh
+PostgreSQL, type-checks and lints the frontend, and builds both images on every
+push to `main`.
+
+---
+
+## Running it on a server (Azure)
+
+Steps 1–9 are for a laptop. On a server the whole platform — database, router,
+API, console — is one `docker compose` project (`docker-compose.yml`), served
+over HTTPS with certificates from Let's Encrypt:
+
+| Host | What |
+|---|---|
+| `console.<DOMAIN>` | the dashboard |
+| `api.<DOMAIN>` | the API |
+| `<app>.<DOMAIN>` | each deployed app |
+
+Without a domain of your own, [sslip.io](https://sslip.io) maps any name
+containing an IP to that IP, so a server at `20.1.2.3` uses
+`DOMAIN=20-1-2-3.sslip.io` and needs no DNS setup.
+
+**1. Create the VM** (Azure CLI: `winget install Microsoft.AzureCLI`, then
+`az login`):
+
+```bash
+infra/azure/provision.sh
+```
+
+This creates an Ubuntu VM with a static IP and ports 80 and 443 open, and
+installs Docker on first boot. It prints the IP and the URLs. On an Azure for
+Students subscription, if creation fails with `RequestDisallowedByPolicy` or
+`SkuNotAvailable`, retry with another region:
+`LOCATION=southindia infra/azure/provision.sh`.
+
+**2. Create a second GitHub OAuth App** for the server. An OAuth App has one
+callback URL, so the laptop's app cannot be reused. The callback URL is
+`https://api.<DOMAIN>/github/callback`.
+
+**3. Deploy:**
+
+```bash
+infra/deploy.sh <server-ip>
+```
+
+On the first run this asks for the OAuth App's ID and secret and an email for
+Let's Encrypt, and generates every other secret on the server. It deploys the
+committed `HEAD` (uncommitted changes are not shipped). Re-run it to ship new
+commits; the server's `.env` is kept between runs.
+
+**4. Create the administrator** — the deploy script prints the exact command.
+
+To move to your own domain later, point `*.yourdomain` and `yourdomain` at the
+VM's IP, change `DOMAIN` in `/opt/deployforge/.env` on the server, update the
+OAuth App's callback URL, and re-run `infra/deploy.sh`.
+
 ---
 
 ## Using it

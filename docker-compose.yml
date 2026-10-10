@@ -1,0 +1,110 @@
+# The whole platform on one machine: database, router, API and console.
+#
+#   cp .env.example .env   # then fill it in
+#   docker compose up -d --build
+#
+# Deployed apps are not in this file. The backend starts them on the host's
+# Docker daemon and attaches them to the `edge` network, where the router finds
+# them by container name.
+
+name: deployforge
+
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: deployforge
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: deployforge
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Only the backend can reach the database: it is not on the edge network
+    # that students' apps share, and it publishes no host port.
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deployforge"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      DATABASE_URL: postgresql+asyncpg://deployforge:${POSTGRES_PASSWORD}@db:5432/deployforge
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:?set TOKEN_ENCRYPTION_KEY in .env}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:?set GITHUB_CLIENT_ID in .env}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:?set GITHUB_CLIENT_SECRET in .env}
+      GITHUB_CALLBACK_URL: https://api.${DOMAIN}/github/callback
+      FRONTEND_ORIGIN: https://console.${DOMAIN}
+      APP_DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+      CONSOLE_HOST: console.${DOMAIN}
+      API_HOST: api.${DOMAIN}
+      TLS_CERT_RESOLVER: le
+      TRAEFIK_PROVIDER_TOKEN: ${TRAEFIK_PROVIDER_TOKEN:?set TRAEFIK_PROVIDER_TOKEN in .env}
+      ROUTER_CONTAINER: deployforge-traefik
+      EDGE_NETWORK: deployforge_edge
+      # Images stay on this machine, which is also where they run. Builds move
+      # to GitHub Actions and its registry in the next phase.
+      REGISTRY_PUSH: "false"
+      REPO_WORKDIR: /var/lib/deployforge/work
+      BUILD_LOG_DIR: /var/lib/deployforge/logs
+      STACKS_DIR: /var/lib/deployforge/stacks
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Mounted at the same path on both sides. The backend runs `docker
+      # compose` against the host's daemon, and a student's compose file may
+      # bind-mount `./data`: the daemon resolves that path on the *host*, so it
+      # has to name the same directory there as it does in here.
+      - /var/lib/deployforge:/var/lib/deployforge
+    networks: [internal, edge]
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: https://api.${DOMAIN}
+    restart: unless-stopped
+    networks: [edge]
+
+  traefik:
+    image: traefik:v3.3
+    container_name: deployforge-traefik
+    restart: unless-stopped
+    depends_on: [backend]
+    command:
+      # The routing table comes from the backend, which reads it from the
+      # database. The router never needs the Docker socket.
+      - --providers.http.endpoint=http://backend:8000/internal/traefik/config?token=${TRAEFIK_PROVIDER_TOKEN}
+      - --providers.http.pollInterval=5s
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      # Let's Encrypt, answering the HTTP-01 challenge on port 80. Traefik
+      # serves the challenge ahead of the redirect above.
+      - --certificatesresolvers.le.acme.email=${ACME_EMAIL:?set ACME_EMAIL in .env}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - letsencrypt:/letsencrypt
+    networks: [edge]
+
+networks:
+  internal:
+  # Fixed name: the backend attaches students' containers to it by this name.
+  edge:
+    name: deployforge_edge
+
+volumes:
+  pgdata:
+  letsencrypt:
