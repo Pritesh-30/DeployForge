@@ -29,6 +29,7 @@ from app.models.deployment import BuildMethod, Deployment, DeploymentStatus
 from app.models.github import GitHubConnection
 from app.models.repository import DetectedType, Repository
 from app.runtime import compose, registry
+from app.runtime.docker import CommandResult
 from app.runtime import service as runtime
 
 API_URL = "https://api.example.test"
@@ -680,14 +681,18 @@ async def test_a_prebuilt_stack_is_pulled_not_built(tmp_path, monkeypatch):
 
     async def fake_stream(command, log_path, timeout, docker_config=None):
         commands.append(command)
+        return CommandResult(exit_code=0, stdout="", stderr="")
 
     monkeypatch.setattr(compose, "_stream", fake_stream)
     await compose.up(
         compose_file=tmp_path / "compose.yaml", project="df-x", log_path=tmp_path / "log"
     )
 
-    assert "--build" not in commands[0]
-    assert str(tmp_path / compose.IMAGES_OVERRIDE) in commands[0]
+    pull, up = commands
+    # Downloaded quietly first: progress output would flood the build log.
+    assert pull[-2:] == ["pull", "--quiet"]
+    assert "up" in up and "--build" not in up
+    assert str(tmp_path / compose.IMAGES_OVERRIDE) in up
 
 
 @pytest.mark.asyncio

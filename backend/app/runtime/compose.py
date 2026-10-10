@@ -362,7 +362,22 @@ async def up(
     prebuilt = override.is_file()
     if prebuilt:
         command += ["--file", str(override)]
-    command += ["--project-name", project, "up", "--detach", "--remove-orphans"]
+    command += ["--project-name", project]
+
+    if prebuilt:
+        # Pulled first, quietly. Without a terminal, `up` prints a fresh line
+        # for every progress tick of every layer, and one image's download
+        # turns into thousands of lines in the student's build log.
+        pulled = await _stream(
+            [*command, "pull", "--quiet"],
+            log_path,
+            timeout_seconds or settings.build_timeout_seconds,
+            docker_config=docker_config,
+        )
+        if not pulled.ok:
+            return pulled
+
+    command += ["up", "--detach", "--remove-orphans"]
     if not prebuilt:
         command.append("--build")
     return await _stream(
