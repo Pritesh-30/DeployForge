@@ -155,3 +155,8 @@ def test_a_recognized_cause_comes_before_the_raw_detail():
     message = diagnose.explain_exit(MONGO_DNS_LOG, None)
     assert message.startswith("Your app could not find its MongoDB cluster")
     assert "exited immediately" in message
+
+
+def test_a_registry_refusal_is_named():
+    log = "ERROR: failed to push: denied: permission_denied: write_package\n"
+    assert "refused to store it" in diagnose.diagnose(log).summary

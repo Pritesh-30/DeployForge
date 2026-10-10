@@ -452,6 +452,10 @@ async def finish(
     )
 
     if status != "success":
+        # The run says how it was building before it builds, so a failure
+        # still shows "Dockerfile" or "Docker Compose" rather than nothing.
+        if method in {m.value for m in BuildMethod}:
+            deployment.build_method = BuildMethod(method)
         if status == "cancelled":
             message = "The run was cancelled on GitHub."
         else:

@@ -35,6 +35,36 @@ class Diagnosis:
 # Ordered most specific first: the first signature to match wins, so a narrow
 # cause is never masked by a broad one.
 _SIGNATURES: list[tuple[re.Pattern[str], Diagnosis]] = [
+    # --- Pushing the image (GitHub Actions builds) --------------------------
+    (
+        re.compile(
+            r"denied: (permission_denied|installation not allowed)|write_package", re.I
+        ),
+        Diagnosis(
+            summary=(
+                "The image was built, but GitHub refused to store it in your "
+                "packages."
+            ),
+            fix=(
+                "If a package with this name already exists on your account, "
+                "open its settings on GitHub and give this repository write "
+                "access under Manage Actions access, then deploy again."
+            ),
+        ),
+    ),
+    (
+        re.compile(r"unknown blob|blob upload unknown|blob unknown", re.I),
+        Diagnosis(
+            summary=(
+                "The image was built, but uploading it to GitHub's registry "
+                "failed part-way."
+            ),
+            fix=(
+                "This is usually a temporary registry error and nothing in "
+                "your project needs to change. Deploy again."
+            ),
+        ),
+    ),
     (
         re.compile(r"Symlink node_modules is invalid", re.I),
         Diagnosis(

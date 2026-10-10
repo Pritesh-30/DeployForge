@@ -726,3 +726,22 @@ async def test_a_connection_with_the_new_scopes_is_not(
     await _connect_github(db_session, user_id)
     status = (await client.get("/github/status", headers=headers)).json()
     assert status["needs_reconnect"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_failed_build_still_records_how_it_was_built(
+    client, db_session, user_credentials
+):
+    """The page should say "Docker Compose", not "Not built", for a failure."""
+    _, deployment_id = await _building(client, db_session, user_credentials)
+
+    await client.post(
+        f"/ci/runs/{deployment_id}/result",
+        json={"status": "failure", "method": "compose", "log": "unknown blob\n"},
+        headers=bearer(),
+    )
+
+    deployment = await db_session.get(Deployment, uuid.UUID(deployment_id))
+    await db_session.refresh(deployment)
+    assert deployment.build_method is BuildMethod.COMPOSE
+    assert "uploading it to GitHub's registry failed" in deployment.error_message

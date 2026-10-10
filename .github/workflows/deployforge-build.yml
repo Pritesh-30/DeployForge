@@ -83,13 +83,20 @@ jobs:
 
       - name: Check out
         if: steps.start.outputs.skip != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           persist-credentials: false
 
       - name: Log in to GitHub Packages
         if: steps.start.outputs.skip != 'true'
         run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # BuildKit in its own container pushes straight from the build. A plain
+      # `docker push` of a freshly built image can fail on GHCR with
+      # "unknown blob" for layers that came from the base image.
+      - name: Set up Docker Buildx
+        if: steps.start.outputs.skip != 'true'
+        uses: docker/setup-buildx-action@v3
 
       - name: Install pack
         if: steps.start.outputs.skip != 'true'
@@ -132,10 +139,14 @@ jobs:
 
           build_dockerfile() {  # image dir dockerfile
             echo "::group::docker build $1"
-            docker build --tag "$1" --file "$3" --label deployforge.managed=true "$2"
+            docker buildx build --push --tag "$1" --file "$3" \
+              --label deployforge.managed=true "$2"
             echo "::endgroup::"
-            docker push "$1"
           }
+
+          # Said before building, so a failed build still reports how it was
+          # being built.
+          started() { jq -n --arg m "$1" '{method: $m}' > "$result"; }
 
           build_pack() {  # image dir
             local args=(build "$1" --path "$2" --builder "$builder" --env-file "$envfile" --publish)
@@ -152,7 +163,61 @@ jobs:
             echo "::endgroup::"
           }
 
+          build_single() {
+            path=$(jq -r .plan.path "$plan")
+            image=$(jq -r .plan.image "$plan")
+            prefix=$(jq -r .plan.image_prefix "$plan")
+            dir="$GITHUB_WORKSPACE/$path"
+
+            if cf=$(compose_file "$dir"); then
+              echo "Building the services in $(basename "$cf") that have a build section."
+              started compose
+              cd "$dir"
+              # Compose substitutes ${VARS} from .env, as it will on the server.
+              cp "$envfile" .env
+              # Resolved once: contexts become absolute paths and variables are
+              # filled in. Saved to a file, so a compose file that does not parse
+              # fails the step here rather than inside a loop.
+              config="$RUNNER_TEMP/compose.json"
+              docker compose -f "$cf" config --format json > "$config"
+
+              # Each service with a build section is built and pushed by BuildKit
+              # directly. (`docker compose build --push` can build into the local
+              # image store and push nothing, while still exiting 0.)
+              services='{}'
+              for svc in $(jq -r '.services | to_entries[] | select(.value.build != null) | .key' "$config"); do
+                build=$(jq -c --arg s "$svc" '.services[$s].build' "$config")
+                context=$(jq -r '.context' <<<"$build")
+                file=$(jq -r '.dockerfile // "Dockerfile"' <<<"$build")
+                case "$file" in /*) ;; *) file="$context/$file" ;; esac
+                args=(--push --file "$file" --label deployforge.managed=true)
+                target=$(jq -r '.target // ""' <<<"$build")
+                if [ -n "$target" ]; then args+=(--target "$target"); fi
+                while IFS= read -r arg; do
+                  if [ -n "$arg" ]; then args+=(--build-arg "$arg"); fi
+                done < <(jq -r '(.args // {}) | to_entries[] | select(.value != null) | "\(.key)=\(.value)"' <<<"$build")
+
+                component=$(echo "$svc" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9._-]/-/g')
+                svc_image="$prefix/$component:$tag"
+                echo "::group::build $svc -> $svc_image"
+                docker buildx build "${args[@]}" --tag "$svc_image" "$context"
+                echo "::endgroup::"
+                services=$(jq -c --arg k "$svc" --arg v "$svc_image" '. + {($k): $v}' <<<"$services")
+              done
+              jq -n --argjson s "$services" '{method: "compose", services: $s}' > "$result"
+            elif df=$(dockerfile "$dir"); then
+              started docker
+              build_dockerfile "$image" "$dir" "$df"
+              jq -n --arg i "$image" '{method: "docker", image: $i}' > "$result"
+            else
+              started buildpack
+              build_pack "$image" "$dir"
+              jq -n --arg i "$image" '{method: "buildpack", image: $i}' > "$result"
+            fi
+          }
+
           if [ "$kind" = stack ]; then
+            started compose
             services='{}'
             count=$(jq '.plan.services | length' "$plan")
             for i in $(seq 0 $((count - 1))); do
@@ -169,44 +234,20 @@ jobs:
               services=$(jq -c --arg k "$name" --arg v "$image" '. + {($k): $v}' <<<"$services")
             done
             jq -n --argjson s "$services" '{method: "compose", services: $s}' > "$result"
-            exit 0
-          fi
-
-          path=$(jq -r .plan.path "$plan")
-          image=$(jq -r .plan.image "$plan")
-          prefix=$(jq -r .plan.image_prefix "$plan")
-          dir="$GITHUB_WORKSPACE/$path"
-
-          if cf=$(compose_file "$dir"); then
-            echo "Building the services in $(basename "$cf") that have a build section."
-            cd "$dir"
-            # Compose substitutes ${VARS} from .env, as it will on the server.
-            cp "$envfile" .env
-            override="$RUNNER_TEMP/deployforge.images.yaml"
-            echo "services:" > "$override"
-            services='{}'
-            # An assignment, so a compose file that does not parse fails the
-            # step here (a failure inside a `for` list would go unnoticed).
-            buildable=$(docker compose -f "$cf" config --format json \
-              | jq -r '.services | to_entries[] | select(.value.build != null) | .key')
-            for svc in $buildable; do
-              component=$(echo "$svc" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9._-]/-/g')
-              svc_image="$prefix/$component:$tag"
-              printf '  %s:\n    image: %s\n' "$(jq -rn --arg s "$svc" '$s|@json')" "$svc_image" >> "$override"
-              services=$(jq -c --arg k "$svc" --arg v "$svc_image" '. + {($k): $v}' <<<"$services")
-            done
-            if [ "$services" != '{}' ]; then
-              docker compose -f "$cf" -f "$override" build
-              for svc_image in $(jq -r '.[]' <<<"$services"); do docker push "$svc_image"; done
-            fi
-            jq -n --argjson s "$services" '{method: "compose", services: $s}' > "$result"
-          elif df=$(dockerfile "$dir"); then
-            build_dockerfile "$image" "$dir" "$df"
-            jq -n --arg i "$image" '{method: "docker", image: $i}' > "$result"
           else
-            build_pack "$image" "$dir"
-            jq -n --arg i "$image" '{method: "buildpack", image: $i}' > "$result"
+            build_single
           fi
+
+          # Confirm every image the result names really is in the registry.
+          # A push that quietly did nothing would otherwise be reported as a
+          # success, and fail later on the server as an image it cannot pull.
+          for ref in $(jq -r '[.image // empty] + [(.services // {})[]] | .[]' "$result"); do
+            if ! docker buildx imagetools inspect "$ref" > /dev/null; then
+              echo "$ref was built but is not in the registry."
+              exit 1
+            fi
+            echo "Stored $ref"
+          done
 
       - name: Report to DeployForge
         if: always() && steps.start.outputs.skip != 'true' && steps.start.outputs.deployment != ''
