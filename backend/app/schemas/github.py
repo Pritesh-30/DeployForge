@@ -22,6 +22,9 @@ class ConnectionStatusOut(BaseModel):
     github_user_id: int | None = None
     scopes: str | None = None
     connected_at: datetime | None = None
+    # Connected, but without permissions the current build path needs —
+    # granted only by going through GitHub's authorization again.
+    needs_reconnect: bool = False
 
 
 class RepoOut(BaseModel):

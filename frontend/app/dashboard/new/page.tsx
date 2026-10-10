@@ -234,19 +234,35 @@ function Wizard() {
         number={1}
         title="Connect GitHub"
         done={!!connection?.connected}
-        description="DeployForge needs read access to list and download your repositories."
+        description="DeployForge needs access to list your repositories and to add the workflow that builds and deploys them."
       >
         {connection === null ? (
           <Skeleton className="h-10 w-48" />
         ) : connection.connected ? (
-          <div className="flex flex-wrap items-center gap-3">
-            <Badge tone="ok">
-              <CheckIcon className="h-3 w-3" />
-              Connected as {connection.github_username}
-            </Badge>
-            <span className="text-xs text-[var(--text-dim)]">
-              since {relativeTime(connection.connected_at)}
-            </span>
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <Badge tone="ok">
+                <CheckIcon className="h-3 w-3" />
+                Connected as {connection.github_username}
+              </Badge>
+              <span className="text-xs text-[var(--text-dim)]">
+                since {relativeTime(connection.connected_at)}
+              </span>
+            </div>
+            {connection.needs_reconnect && (
+              <div className="space-y-3">
+                <Alert title="GitHub needs to grant two more permissions">
+                  Apps are now built by GitHub Actions in your own repository.
+                  DeployForge needs permission to add its workflow file there
+                  and to read the images it builds.
+                </Alert>
+                <Button variant="primary" onClick={connect}>
+                  <GitHubIcon className="h-4 w-4" />
+                  Reconnect GitHub
+                </Button>
+                {connectError && <Alert>{connectError}</Alert>}
+              </div>
+            )}
           </div>
         ) : (
           <div className="space-y-3">

@@ -7,6 +7,7 @@ httpx. Nothing here touches the database or FastAPI.
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 import httpx
@@ -170,3 +171,133 @@ async def get_head_commit(access_token: str, full_name: str, ref: str) -> str | 
     if isinstance(commit, dict) and isinstance(commit.get("sha"), str):
         return commit["sha"]
     return None
+
+
+# ---------------------------------------------------------------------------
+# Writing: the build workflow
+# ---------------------------------------------------------------------------
+
+async def _send(
+    access_token: str, method: str, path: str, *, json: Any = None
+) -> httpx.Response:
+    """A request whose status the caller interprets. Raises only on transport."""
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            return await client.request(
+                method,
+                f"{GITHUB_API_URL}{path}",
+                headers=api_headers(access_token),
+                json=json,
+            )
+    except httpx.HTTPError as exc:
+        raise GitHubApiError(f"Could not reach GitHub: {type(exc).__name__}") from exc
+
+
+def _write_error(response: httpx.Response, action: str) -> GitHubApiError:
+    """A GitHub refusal to write, as something a student can act on."""
+    detail = ""
+    try:
+        detail = str(response.json().get("message") or "")
+    except ValueError:
+        pass
+    if response.status_code == 401:
+        return GitHubApiError(
+            "GitHub rejected the stored token. Please reconnect your GitHub account."
+        )
+    if "workflow" in detail.lower() and "scope" in detail.lower():
+        return GitHubApiError(
+            "DeployForge needs permission to add its build workflow to your "
+            "repository. Reconnect GitHub and approve the new permissions.",
+            code="github_scope_missing",
+            status_code=403,
+        )
+    if response.status_code in (403, 404):
+        return GitHubApiError(
+            f"GitHub refused to {action} ({detail or response.status_code}). You "
+            "need write access to the repository, and its owner must allow "
+            "GitHub Actions.",
+            status_code=403,
+        )
+    return GitHubApiError(
+        f"GitHub could not {action} (HTTP {response.status_code}: {detail})."
+    )
+
+
+async def get_file(
+    access_token: str, full_name: str, path: str, ref: str
+) -> tuple[str, str] | None:
+    """(decoded text, blob sha) of a file on `ref`, or None if absent."""
+    response = await _send(
+        access_token, "GET", f"/repos/{full_name}/contents/{path}?ref={ref}"
+    )
+    if response.status_code == 404:
+        return None
+    if response.status_code >= 400:
+        raise _write_error(response, f"read {path}")
+    body = response.json()
+    try:
+        text = base64.b64decode(body.get("content") or "").decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        text = ""
+    return text, body.get("sha") or ""
+
+
+async def put_file(
+    access_token: str,
+    full_name: str,
+    path: str,
+    *,
+    content: str,
+    branch: str,
+    message: str,
+) -> bool:
+    """
+    Create or update a file on `branch`. Returns whether a commit was made.
+
+    Unchanged content is not committed again, so deploying from the dashboard
+    over and over does not litter the student's history.
+    """
+    existing = await get_file(access_token, full_name, path, branch)
+    if existing is not None and existing[0] == content:
+        return False
+
+    payload: dict[str, Any] = {
+        "message": message,
+        "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+        "branch": branch,
+    }
+    if existing is not None:
+        payload["sha"] = existing[1]
+
+    response = await _send(
+        access_token, "PUT", f"/repos/{full_name}/contents/{path}", json=payload
+    )
+    if response.status_code >= 400:
+        raise _write_error(response, f"write {path}")
+    return True
+
+
+async def dispatch_workflow(
+    access_token: str,
+    full_name: str,
+    workflow_file: str,
+    *,
+    ref: str,
+    inputs: dict[str, str],
+) -> bool:
+    """
+    Start a `workflow_dispatch` run. Returns False if GitHub does not (yet)
+    know the workflow — it can take a few seconds to register a new file.
+    """
+    response = await _send(
+        access_token,
+        "POST",
+        f"/repos/{full_name}/actions/workflows/{workflow_file}/dispatches",
+        json={"ref": ref, "inputs": inputs},
+    )
+    if response.status_code == 204:
+        return True
+    if response.status_code == 404:
+        return False
+    raise _write_error(response, "start the build workflow")
+

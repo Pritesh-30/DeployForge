@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -50,7 +51,11 @@ class CommandResult:
         return text.splitlines()[-1] if text else f"exit code {self.exit_code}"
 
 
-async def _run(*args: str, timeout: float = DEFAULT_TIMEOUT) -> CommandResult:
+async def _run(
+    *args: str,
+    timeout: float = DEFAULT_TIMEOUT,
+    docker_config: Path | None = None,
+) -> CommandResult:
     """
     Run `docker <args>` and capture its output. Never raises on failure.
 
@@ -68,6 +73,7 @@ async def _run(*args: str, timeout: float = DEFAULT_TIMEOUT) -> CommandResult:
     def call() -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [settings.docker_binary, *args],
+            env=_environment(docker_config),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -90,6 +96,19 @@ async def _run(*args: str, timeout: float = DEFAULT_TIMEOUT) -> CommandResult:
         stdout=completed.stdout or "",
         stderr=completed.stderr or "",
     )
+
+
+def _environment(docker_config: Path | None) -> dict[str, str] | None:
+    """
+    The child's environment: ours, pointed at `docker_config` when given.
+
+    A separate client config per call, rather than `docker login`, keeps one
+    student's registry credentials out of every other docker command the
+    server runs — and out of the next student's pull.
+    """
+    if docker_config is None:
+        return None
+    return {**os.environ, "DOCKER_CONFIG": str(docker_config)}
 
 
 async def daemon_available() -> bool:
@@ -288,6 +307,22 @@ async def push_image(
     )
 
 
+async def image_present(image_ref: str) -> bool:
+    """Whether the image is already on this machine."""
+    result = await _run("image", "inspect", "--format", "{{.Id}}", image_ref)
+    return result.ok
+
+
+async def pull_image(
+    image_ref: str, *, docker_config: Path | None = None, timeout_seconds: int = 900
+) -> CommandResult:
+    """Fetch an image from its registry."""
+    return await _run(
+        "pull", "--quiet", image_ref,
+        timeout=timeout_seconds, docker_config=docker_config,
+    )
+
+
 async def tag_image(source: str, target: str) -> CommandResult:
     return await _run("tag", source, target)
 
@@ -298,7 +333,10 @@ async def remove_image(image_ref: str) -> CommandResult:
 
 
 async def _stream(
-    command: list[str], log_path: Path | None, timeout: float
+    command: list[str],
+    log_path: Path | None,
+    timeout: float,
+    docker_config: Path | None = None,
 ) -> CommandResult:
     """
     Run a long command with its output appended to a log file.
@@ -308,7 +346,7 @@ async def _stream(
     it is still running.
     """
     if log_path is None:
-        return await _run(*command[1:], timeout=timeout)
+        return await _run(*command[1:], timeout=timeout, docker_config=docker_config)
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -318,7 +356,10 @@ async def _stream(
             log.flush()
             try:
                 process = subprocess.Popen(
-                    command, stdout=log, stderr=subprocess.STDOUT
+                    command,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    env=_environment(docker_config),
                 )
             except OSError as exc:
                 log.write(f"\nCould not start: {exc}\n")

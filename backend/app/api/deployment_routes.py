@@ -53,6 +53,8 @@ def deployment_out(
         build_finished_at=deployment.build_finished_at,
         error_message=deployment.error_message,
         has_logs=bool(deployment.logs_ref),
+        ci_run_url=deployment.ci_run_url,
+        ci_trigger=deployment.ci_trigger,
         url=deployment.url,
         subdomain=deployment.subdomain,
         app_port=deployment.app_port,

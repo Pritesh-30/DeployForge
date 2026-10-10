@@ -375,7 +375,6 @@ async def _build_stack(
     together by Compose on one private network, which is what lets the frontend
     reach the backend at all.
     """
-    project = compose.project_name(deployment.id)
     images: dict[str, str] = {}
 
     # A stack, whatever each service was individually built with: the runtime
@@ -438,6 +437,27 @@ async def _build_stack(
     if not images:
         return False, "No services were selected for this deployment."
 
+    await write_stack(db, deployment, images=images, env=env, log_file=log_file)
+    return True, None
+
+
+async def write_stack(
+    db: AsyncSession,
+    deployment: Deployment,
+    *,
+    images: dict[str, str],
+    env: dict[str, str],
+    log_file: Path,
+) -> None:
+    """
+    Write the compose file that runs a multi-service target's images together.
+
+    Shared by builds done here and builds done in GitHub Actions: either way
+    the result is one image per directory, and this is what wires them up.
+    """
+    project = compose.project_name(deployment.id)
+    deployment.build_method = BuildMethod.COMPOSE
+
     # The stack file references the images just built, so `compose up` starts
     # them rather than rebuilding from source it no longer has.
     stack_dir = compose.stack_dir_for(deployment.id)
@@ -466,7 +486,6 @@ async def _build_stack(
         f"{web} will receive traffic. Each service can reach the others at "
         + ", ".join(f"{k}" for k in wiring),
     )
-    return True, None
 
 
 async def _prepare_compose(

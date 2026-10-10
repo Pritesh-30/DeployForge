@@ -30,6 +30,8 @@ from app.auth.dependencies import CurrentUser
 from app.builder import pack
 from app.builder import stack
 from app.builder.service import run_build
+from app.ci import service as ci_service
+from app.config import settings
 from app.core.errors import PermissionError_, AppError, ConflictError, NotFoundError
 from app.db import get_db
 from app.detection.candidates import (
@@ -50,6 +52,7 @@ from app.github.scan_token import create_scan_token, read_scan_token
 from app.github.token import get_access_token
 from app.models.deployment import BuildMethod, Deployment, DeploymentStatus
 from app.models.repository import DetectedType, Repository
+from app.runtime.service import ci_build_abandoned, release_abandoned_ci_build
 from app.schemas.deployment import BuildStartedOut
 from app.schemas.repository import (
     CandidateOut,
@@ -455,6 +458,9 @@ async def build_repository(
     _require_deploy_permission(current_user)
     repository = await _owned_repository(db, repo_id, current_user.id)
 
+    if settings.builds_on_actions:
+        return await _build_on_actions(db, repository, current_user, background_tasks)
+
     # Only a buildpack build needs `pack`. A repository with its own Dockerfile
     # is built by Docker alone, and demanding an unrelated tool before starting
     # would block the one path that needs nothing extra installed. The final
@@ -497,6 +503,49 @@ async def build_repository(
     await db.refresh(deployment)
 
     background_tasks.add_task(run_build, deployment.id)
+
+    return BuildStartedOut(
+        deployment_id=deployment.id,
+        status=deployment.status,
+        target_label=repository.target_label,
+    )
+
+
+async def _build_on_actions(
+    db: AsyncSession,
+    repository: Repository,
+    user,
+    background_tasks: BackgroundTasks,
+) -> BuildStartedOut:
+    """
+    Start a build in the student's own GitHub Actions.
+
+    The checks that need the student — permissions only they can grant — are
+    made here, in the request, so the error appears on the button they
+    pressed. Talking to GitHub happens in the background.
+    """
+    ci_service.ensure_configured()
+    await ci_service.ensure_scopes(db, user.id)
+
+    in_flight = (
+        await db.execute(
+            select(Deployment).where(
+                Deployment.repository_id == repository.id,
+                Deployment.status.in_(_IN_FLIGHT),
+            )
+        )
+    ).scalars().all()
+    for deployment in in_flight:
+        if deployment.built_on_actions and ci_build_abandoned(deployment):
+            release_abandoned_ci_build(deployment)
+        else:
+            raise ConflictError(
+                f"A build is already running for {repository.target_label}."
+            )
+    await db.commit()
+
+    deployment = await ci_service.queue(db, repository, user)
+    background_tasks.add_task(ci_service.dispatch, deployment.id)
 
     return BuildStartedOut(
         deployment_id=deployment.id,

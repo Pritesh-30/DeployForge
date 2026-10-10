@@ -343,23 +343,54 @@ async def up(
     log_path: Path,
     env: dict[str, str] | None = None,
     timeout_seconds: int | None = None,
+    docker_config: Path | None = None,
 ) -> CommandResult:
     """
     Build and start the whole stack, streaming output into the build log.
 
     `--build` because a compose file that builds from source must not silently
-    run a stale image from a previous deploy.
+    run a stale image from a previous deploy. A stack built in GitHub Actions
+    carries an override naming the images that were built there instead (see
+    `IMAGES_OVERRIDE`), and those are pulled, never rebuilt here.
     """
     command = [
         settings.docker_binary,
         "compose",
         "--file", str(compose_file),
-        "--project-name", project,
-        "up", "--detach", "--build", "--remove-orphans",
     ]
+    override = compose_file.parent / IMAGES_OVERRIDE
+    prebuilt = override.is_file()
+    if prebuilt:
+        command += ["--file", str(override)]
+    command += ["--project-name", project, "up", "--detach", "--remove-orphans"]
+    if not prebuilt:
+        command.append("--build")
     return await _stream(
-        command, log_path, timeout_seconds or settings.build_timeout_seconds
+        command,
+        log_path,
+        timeout_seconds or settings.build_timeout_seconds,
+        docker_config=docker_config,
     )
+
+
+# Beside a stack's compose file when its images were built elsewhere: for each
+# service that had a `build:` section, the image that was built for it, with
+# the build section removed so Compose cannot fall back to building here.
+IMAGES_OVERRIDE = "deployforge.images.yaml"
+
+
+def write_images_override(stack_dir: Path, images: dict[str, str]) -> Path:
+    """Write the override that points built services at their images."""
+    lines = ["services:"]
+    for service, image in sorted(images.items()):
+        lines += [
+            f"  {json.dumps(service)}:",
+            f"    image: {json.dumps(image)}",
+            "    build: !reset null",
+        ]
+    path = stack_dir / IMAGES_OVERRIDE
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
 
 
 async def down(project: str, *, remove_volumes: bool = False) -> CommandResult:

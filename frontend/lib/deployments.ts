@@ -38,6 +38,10 @@ export type Deployment = {
   build_finished_at: string | null;
   error_message: string | null;
   has_logs: boolean;
+  /** The GitHub Actions run that built this, when it was built there. */
+  ci_run_url: string | null;
+  /** What started that run: a push to the repository, or the dashboard. */
+  ci_trigger: "push" | "dashboard" | null;
 
   url: string | null;
   subdomain: string | null;

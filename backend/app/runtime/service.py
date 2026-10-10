@@ -31,7 +31,7 @@ from app.models.environment import EnvironmentVariable
 from app.models.event import DeploymentEvent, EventLevel
 from app.models.repository import Repository
 from app.models.user import User
-from app.runtime import compose, docker, naming, ports
+from app.runtime import compose, docker, naming, ports, registry
 
 logger = logging.getLogger(__name__)
 
@@ -354,6 +354,8 @@ async def _start_container(
     container = deployment.container_name or naming.container_name_for(deployment.id)
     deployment.container_name = container
 
+    await _pull_if_needed(db, deployment, actor=actor)
+
     exposed = await docker.image_exposed_ports(deployment.image_ref)
     port = ports.choose_port(
         exposed_ports=exposed,
@@ -432,9 +434,18 @@ async def _start_compose(
     _write_compose_env(stack_dir, env)
 
     log_file = _build_log_path(deployment)
-    result = await compose.up(
-        compose_file=compose_file, project=project, log_path=log_file
-    )
+    # A stack built in GitHub Actions pulls its images from the student's
+    # registry, with their credentials; one built here needs none.
+    if deployment.built_on_actions:
+        async with registry.credentials_for(db, deployment.user_id) as docker_config:
+            result = await compose.up(
+                compose_file=compose_file, project=project, log_path=log_file,
+                docker_config=docker_config,
+            )
+    else:
+        result = await compose.up(
+            compose_file=compose_file, project=project, log_path=log_file
+        )
     if not result.ok:
         await _fail(
             db, deployment,
@@ -464,6 +475,33 @@ async def _start_compose(
     # Idempotent: already being on the network is not an error.
     await compose.attach_to_edge(container)
     return container
+
+
+async def _pull_if_needed(
+    db: AsyncSession, deployment: Deployment, *, actor: str
+) -> None:
+    """
+    Fetch an image built in GitHub Actions, unless it is already here.
+
+    Tags are commit SHAs, so an image that is present is the right one and is
+    never pulled twice.
+    """
+    image_ref = deployment.image_ref
+    if not registry.needs_credentials(image_ref):
+        return
+    if await docker.image_present(image_ref):
+        return
+
+    await record(db, deployment.id, "start", f"Pulling {image_ref}.", actor=actor)
+    async with registry.credentials_for(db, deployment.user_id) as docker_config:
+        result = await docker.pull_image(image_ref, docker_config=docker_config)
+    if not result.ok:
+        message = (
+            f"Could not pull {image_ref}: {result.message}. If this keeps "
+            "happening, reconnect GitHub so DeployForge can read your packages."
+        )
+        await _fail(db, deployment, message)
+        raise RuntimeError_(message)
 
 
 def _write_compose_env(stack_dir, env: dict[str, str]) -> None:
@@ -616,7 +654,7 @@ async def release_interrupted_builds(db: AsyncSession) -> int:
     so this is safe to run unconditionally at startup. Returns how many rows it
     released.
     """
-    stuck = (
+    in_flight = (
         await db.execute(
             select(Deployment).where(
                 Deployment.status.in_(
@@ -629,8 +667,18 @@ async def release_interrupted_builds(db: AsyncSession) -> int:
             )
         )
     ).scalars().all()
+    # A build running in GitHub Actions did not die with this process; it
+    # will still report back. Only one that has gone silent for longer than
+    # any build may take is given up on — see `ci_build_abandoned`.
+    stuck = [
+        d for d in in_flight
+        if not d.built_on_actions or ci_build_abandoned(d)
+    ]
 
     for deployment in stuck:
+        if deployment.built_on_actions:
+            release_abandoned_ci_build(deployment)
+            continue
         deployment.status = DeploymentStatus.FAILED
         deployment.build_finished_at = datetime.now(timezone.utc)
         deployment.error_message = (
@@ -650,6 +698,39 @@ async def release_interrupted_builds(db: AsyncSession) -> int:
         await db.commit()
         logger.info("Released %d interrupted build(s)", len(stuck))
     return len(stuck)
+
+
+def ci_build_abandoned(deployment: Deployment) -> bool:
+    """
+    Whether a GitHub Actions build has been silent for too long to wait on.
+
+    A run that was cancelled before it could report, or whose workflow never
+    started (Actions disabled, the file deleted), leaves its deployment in
+    flight with nothing behind it. The build timeout is the longest a real
+    build can take, so past it the row is released and the app can be built
+    again.
+    """
+    if deployment.status not in (
+        DeploymentStatus.QUEUED, DeploymentStatus.BUILDING, DeploymentStatus.PUSHING
+    ):
+        return False
+    since = deployment.build_started_at or deployment.updated_at
+    if since is None:
+        return False
+    age = (datetime.now(timezone.utc) - since).total_seconds()
+    return age > settings.build_timeout_seconds
+
+
+def release_abandoned_ci_build(deployment: Deployment) -> None:
+    """Fail a GitHub Actions build that never reported back. Caller commits."""
+    deployment.status = DeploymentStatus.FAILED
+    deployment.build_finished_at = datetime.now(timezone.utc)
+    deployment.error_message = (
+        "GitHub Actions never reported a result for this build. The run may "
+        "have been cancelled, or Actions may be disabled for the repository"
+        + (f" — see {deployment.ci_run_url}" if deployment.ci_run_url else "")
+        + ". Press Deploy to try again."
+    )
 
 
 async def reconcile(db: AsyncSession) -> int:

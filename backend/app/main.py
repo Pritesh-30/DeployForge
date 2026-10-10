@@ -13,12 +13,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 import logging
+import re
 from contextlib import asynccontextmanager
 
 from app.api import (
     admin_routes,
     app_routes,
     auth_routes,
+    ci_routes,
     deployment_routes,
     environment_routes,
     github_routes,
@@ -32,6 +34,28 @@ from app.runtime import docker as docker_runtime
 from app.runtime import service as runtime_service
 
 logger = logging.getLogger(__name__)
+
+_TOKEN_IN_QUERY = re.compile(r"([?&]token=)[^&\s]*")
+
+
+class _RedactTokens(logging.Filter):
+    """
+    Keep the router's shared secret out of the access log.
+
+    Traefik presents it as a query parameter every few seconds, so without
+    this it would be written to the log thousands of times a day.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                _TOKEN_IN_QUERY.sub(r"\1***", a) if isinstance(a, str) else a
+                for a in record.args
+            )
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_RedactTokens())
 
 
 @asynccontextmanager
@@ -99,6 +123,7 @@ app.include_router(deployment_routes.router)
 app.include_router(app_routes.router)
 app.include_router(admin_routes.router)
 app.include_router(internal_routes.router)
+app.include_router(ci_routes.router)
 
 
 @app.get("/health", tags=["health"])

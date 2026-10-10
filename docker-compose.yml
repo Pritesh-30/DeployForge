@@ -50,8 +50,11 @@ services:
       TRAEFIK_PROVIDER_TOKEN: ${TRAEFIK_PROVIDER_TOKEN:?set TRAEFIK_PROVIDER_TOKEN in .env}
       ROUTER_CONTAINER: deployforge-traefik
       EDGE_NETWORK: deployforge_edge
-      # Images stay on this machine, which is also where they run. Builds move
-      # to GitHub Actions and its registry in the next phase.
+      # Builds run in GitHub Actions in each student's repository, which pushes
+      # the image to their GitHub registry; this machine only pulls and runs
+      # it. GitHub calls back to PUBLIC_API_URL, so it must be reachable.
+      BUILD_BACKEND: actions
+      PUBLIC_API_URL: https://api.${DOMAIN}
       REGISTRY_PUSH: "false"
       REPO_WORKDIR: /var/lib/deployforge/work
       BUILD_LOG_DIR: /var/lib/deployforge/logs

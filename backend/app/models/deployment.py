@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
     Enum,
@@ -195,6 +196,19 @@ class Deployment(Base, UUIDMixin, TimestampMixin):
     compose_web_service: Mapped[str | None] = mapped_column(
         String(255), nullable=True
     )
+    # --- GitHub Actions builds ---
+    # Set when the build runs in the student's repository rather than here.
+    # A server restart cannot interrupt such a build, so it is the difference
+    # between "released at startup" and "still running somewhere else".
+    ci_run_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    ci_run_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # "push" or "dashboard": a push deploys on its own, and the timeline says
+    # which one it was.
+    ci_trigger: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    built_on_actions: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+
     target_server_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
     logs_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

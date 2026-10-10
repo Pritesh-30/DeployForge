@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import CurrentUser
+from app.ci import service as ci_service
 from app.config import settings
 from app.core.errors import AppError, NotFoundError
 from app.db import get_db
@@ -133,6 +134,9 @@ async def connection_status(
         github_user_id=connection.github_user_id,
         scopes=connection.scopes,
         connected_at=connection.created_at,
+        needs_reconnect=(
+            settings.builds_on_actions and bool(ci_service.missing_scopes(connection))
+        ),
     )
 
 

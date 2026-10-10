@@ -46,7 +46,10 @@ class Settings(BaseSettings):
     github_client_id: str = ""
     github_client_secret: str = ""
     github_callback_url: str = "http://localhost:8000/github/callback"
-    github_oauth_scopes: str = "repo,admin:repo_hook"
+    # `repo` lists and downloads repositories; `workflow` lets DeployForge
+    # commit the build workflow into one; `read:packages` lets the server pull
+    # the image that workflow pushed to the student's GitHub registry.
+    github_oauth_scopes: str = "repo,workflow,read:packages"
 
     # --- Frontend ---
     frontend_origin: str = "http://localhost:3000"
@@ -76,6 +79,27 @@ class Settings(BaseSettings):
     build_timeout_seconds: int = 1800
     # Where build logs are written. Empty = alongside the repo workdir.
     build_log_dir: str = ""
+
+    # Where builds run:
+    #   "local"   — on this server, with docker / pack (a laptop, or no
+    #               public URL GitHub could call back to);
+    #   "actions" — in GitHub Actions, in the student's own repository. The
+    #               image goes to their GitHub registry and only *runs* here.
+    build_backend: str = "local"
+    # The API's public URL. GitHub Actions calls it back, so it must be
+    # reachable from the internet — `localhost` will not do.
+    public_api_url: str = "http://localhost:8000"
+    # The reusable workflow every student's workflow file calls. It lives in a
+    # public repository so private repositories may use it.
+    ci_workflow: str = (
+        "Pritesh-30/DeployForge/.github/workflows/deployforge-build.yml@main"
+    )
+    # GitHub's OIDC issuer, and the audience runs must request their token
+    # for. Empty audience = the public API URL, so a token minted for one
+    # DeployForge server is refused by any other.
+    ci_oidc_issuer: str = "https://token.actions.githubusercontent.com"
+    ci_oidc_audience: str = ""
+    ci_registry: str = "ghcr.io"
 
     # --- Image registry ---
     # Where built images are pushed and run from. A build that only tags an
@@ -136,6 +160,14 @@ class Settings(BaseSettings):
         """Registry host with a trailing separator, or "" when pushing is off."""
         host = self.registry_host.strip().rstrip("/")
         return f"{host}/" if host and self.registry_push else ""
+
+    @property
+    def builds_on_actions(self) -> bool:
+        return self.build_backend.strip().lower() == "actions"
+
+    @property
+    def oidc_audience(self) -> str:
+        return self.ci_oidc_audience.strip() or self.public_api_url.strip().rstrip("/")
 
     @property
     def app_scheme(self) -> str:

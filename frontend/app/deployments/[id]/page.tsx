@@ -33,6 +33,7 @@ import {
   BoxIcon,
   DockerIcon,
   ExternalIcon,
+  GitHubIcon,
   LayersIcon,
   PlayIcon,
   RestartIcon,
@@ -348,6 +349,32 @@ function Detail() {
           <Mono className="mt-1 block break-all text-[var(--text)]">
             {deployment.image_ref}
           </Mono>
+        </Card>
+      )}
+
+      {deployment.ci_run_url && (
+        <Card className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+          <div className="min-w-0">
+            <p className="text-xs font-medium uppercase tracking-wider text-[var(--text-dim)]">
+              Built in GitHub Actions
+            </p>
+            <p className="mt-1 text-sm text-[var(--text-muted)]">
+              {deployment.ci_trigger === "push"
+                ? "Started by a push to the repository."
+                : "Started from the dashboard."}{" "}
+              The live build output is on GitHub; the log below fills in when
+              the run finishes.
+            </p>
+          </div>
+          <a href={deployment.ci_run_url} target="_blank" rel="noreferrer">
+            <Button
+              variant="secondary"
+              trailing={<ExternalIcon className="h-3.5 w-3.5" />}
+            >
+              <GitHubIcon className="h-3.5 w-3.5" />
+              View run
+            </Button>
+          </a>
         </Card>
       )}
 

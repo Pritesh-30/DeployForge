@@ -367,6 +367,49 @@ To move to your own domain later, point `*.yourdomain` and `yourdomain` at the
 VM's IP, change `DOMAIN` in `/opt/deployforge/.env` on the server, update the
 OAuth App's callback URL, and re-run `infra/deploy.sh`.
 
+### Builds run in GitHub Actions
+
+On the server (`BUILD_BACKEND=actions`, set by `docker-compose.yml`) nothing
+is built on the VM. Each app is built in its own repository's GitHub Actions,
+and the server only pulls and runs the result:
+
+```
+Deploy button ─> DeployForge commits .github/workflows/deployforge-<id>.yml
+                 to the repo (first time only) and starts it
+git push ──────> the same workflow starts by itself
+                        │
+                GitHub Actions, in the student's repository
+                  build: compose file / Dockerfile / buildpacks
+                  push:  ghcr.io/<student>/<repo>/...:<commit>
+                  report the result and the log ──> DeployForge
+                        │
+                DeployForge pulls the image and replaces the running app
+```
+
+- **Every push to the connected branch redeploys the app.** Pushes to other
+  branches are ignored, and in a monorepo only changes under the app's own
+  directory trigger it. Deleting the workflow file turns this off.
+- **Nothing secret is stored in the student's repository.** Each run proves
+  which repository it is in with a GitHub-signed OIDC token, and the server
+  only accepts results for apps connected from that repository. The app's
+  environment variables are handed to the run when it starts, masked in its
+  log, and removed from the log copy the server keeps.
+- **Images belong to the student.** They are pushed to the student's own GitHub
+  container registry (private when the repository is) and pulled with their
+  GitHub token.
+- The student's workflow file is a few lines that call
+  `.github/workflows/deployforge-build.yml` **in this repository**, which
+  must therefore be public and have that file on `main` (`CI_WORKFLOW`
+  changes where it points).
+
+Students connect GitHub with three permissions: `repo`, `workflow` (to add the
+workflow file) and `read:packages` (to pull their images). Anyone who connected
+before builds moved to Actions sees a **Reconnect GitHub** button under
+**Deploy new**.
+
+On a laptop the default stays `BUILD_BACKEND=local`: GitHub cannot call back
+to `localhost`, so builds run on the machine as before.
+
 ---
 
 ## Using it
@@ -422,6 +465,7 @@ backend/
     api/          route handlers: apps, deployments, admin, the router's config
     auth/         JWT issuing, hashing, dependencies
     builder/      docker build, buildpacks, compose preparation, registry push
+    ci/           GitHub Actions builds: the workflow file, run identity, callbacks
     detection/    pure repository analysis — no network, no database
     github/       OAuth, API client, tarball download
     models/       SQLAlchemy tables

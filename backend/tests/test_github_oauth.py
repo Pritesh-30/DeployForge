@@ -281,6 +281,7 @@ async def test_status_is_disconnected_before_connecting(client, user_credentials
         "github_user_id": None,
         "scopes": None,
         "connected_at": None,
+        "needs_reconnect": False,
     }
 
 

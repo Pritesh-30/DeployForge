@@ -448,7 +448,10 @@ async def platform_status(_admin: AdminUser) -> PlatformStatusOut:
     registry_ok = await _registry_reachable()
     if not registry_ok:
         detail["registry"] = (
-            f"No registry at {settings.registry_host}. Builds still work; "
+            f"{settings.ci_registry} is not reachable, so images built in GitHub "
+            "Actions cannot be pulled."
+            if settings.builds_on_actions
+            else f"No registry at {settings.registry_host}. Builds still work; "
             "images are kept locally instead of being stored."
         )
 
@@ -478,9 +481,13 @@ async def platform_status(_admin: AdminUser) -> PlatformStatusOut:
 
 async def _registry_reachable() -> bool:
     """True when the image registry answers its version endpoint."""
-    if not settings.registry_push:
+    if settings.builds_on_actions:
+        # Images are built in GitHub Actions and stored in GitHub's registry.
+        url = f"https://{settings.ci_registry.strip().rstrip('/')}/v2/"
+    elif not settings.registry_push:
         return False
-    url = f"http://{settings.registry_host.strip().rstrip('/')}/v2/"
+    else:
+        url = f"http://{settings.registry_host.strip().rstrip('/')}/v2/"
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(url)

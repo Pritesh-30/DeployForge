@@ -406,6 +406,7 @@ function DeploymentRow({
         <div className="flex min-w-0 flex-wrap items-center gap-2.5">
           <StatusBadge status={deployment.status} />
           {isCurrent && <Badge tone="accent">Current</Badge>}
+          {deployment.ci_trigger === "push" && <Badge>git push</Badge>}
           {deployment.commit_sha && (
             <Mono title={deployment.commit_sha}>
               {deployment.commit_sha.slice(0, 7)}

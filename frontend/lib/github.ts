@@ -14,6 +14,8 @@ export type ConnectionStatus = {
   github_user_id: number | null;
   scopes: string | null;
   connected_at: string | null;
+  /** Connected, but without permissions builds now need. */
+  needs_reconnect?: boolean;
 };
 
 export function getConnectionStatus(): Promise<ConnectionStatus> {

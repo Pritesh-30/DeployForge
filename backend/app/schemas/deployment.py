@@ -34,6 +34,10 @@ class DeploymentOut(BaseModel):
     build_finished_at: datetime | None = None
     error_message: str | None = None
     has_logs: bool = False
+    # Set when the build ran in GitHub Actions: where its live output is, and
+    # whether a push or the dashboard started it.
+    ci_run_url: str | None = None
+    ci_trigger: str | None = None
 
     # --- runtime ---
     url: str | None = None
