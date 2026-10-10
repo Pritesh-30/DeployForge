@@ -199,6 +199,21 @@ export function connectedState(status: string | null): {
   }
 }
 
+export type PreviewEntry = {
+  /** Relative to the repository root, with forward slashes. */
+  path: string;
+  type: "dir" | "file";
+  size: number;
+};
+
+export type RepoPreview = {
+  entries: PreviewEntry[];
+  /** README per directory; "" is the repository root. */
+  readmes: Record<string, { name: string; content: string }>;
+  /** The tree was too large to list completely. */
+  truncated: boolean;
+};
+
 export type ScanResult = {
   full_name: string;
   default_branch: string;
@@ -207,7 +222,32 @@ export type ScanResult = {
   total_bytes: number;
   candidates: Candidate[];
   scan_token: string;
+  description: string | null;
+  language: string | null;
+  private: boolean;
+  html_url: string | null;
+  preview: RepoPreview | null;
 };
+
+export type FilePreview = {
+  path: string;
+  size: number;
+  /** null when the file is binary or too large to show. */
+  content: string | null;
+  binary: boolean;
+  truncated: boolean;
+  html_url: string | null;
+};
+
+/** One file's contents, read with the user's own GitHub token. */
+export function getFilePreview(
+  fullName: string,
+  path: string,
+  ref: string,
+): Promise<FilePreview> {
+  const query = new URLSearchParams({ full_name: fullName, path, ref });
+  return apiFetch<FilePreview>(`/repos/file?${query}`);
+}
 
 /**
  * Download the repo once and list what could be deployed from it. Writes

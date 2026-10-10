@@ -14,6 +14,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 
+import RepoPreview from "@/components/RepoPreview";
 import RequireAuth from "@/components/RequireAuth";
 import {
   Alert,
@@ -538,6 +539,15 @@ function Wizard() {
                 where the log streams as it happens. The first buildpack build on
                 a machine downloads a large builder image and takes a while.
               </p>
+            </div>
+          )}
+
+          {scan.preview && (
+            <div className="mt-6">
+              <p className="mb-2 text-xs font-medium uppercase tracking-wider text-[var(--text-dim)]">
+                Repository preview
+              </p>
+              <RepoPreview key={scan.scan_token} scan={scan} picked={picked} />
             </div>
           )}
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -39,6 +39,38 @@ class CandidateOut(BaseModel):
     deployment_status: str | None = None
 
 
+class PreviewEntryOut(BaseModel):
+    path: str  # relative, POSIX separators
+    type: Literal["dir", "file"]
+    size: int
+
+
+class ReadmeOut(BaseModel):
+    name: str
+    content: str
+
+
+class RepoPreviewOut(BaseModel):
+    """The repository as GitHub would show it: its tree and its READMEs."""
+
+    entries: list[PreviewEntryOut]
+    # Keyed by directory; "" is the repository root.
+    readmes: dict[str, ReadmeOut]
+    truncated: bool = False
+
+
+class FilePreviewOut(BaseModel):
+    """One file's contents, for the preview's file viewer."""
+
+    path: str
+    size: int
+    # None when the file is binary or too large to show.
+    content: str | None = None
+    binary: bool = False
+    truncated: bool = False
+    html_url: str | None = None
+
+
 class ScanOut(BaseModel):
     """
     The result of scanning a repository: what is here, and what to send back.
@@ -55,6 +87,12 @@ class ScanOut(BaseModel):
     total_bytes: int
     candidates: list[CandidateOut]
     scan_token: str
+
+    description: str | None = None
+    language: str | None = None
+    private: bool = False
+    html_url: str | None = None
+    preview: RepoPreviewOut | None = None
 
 
 class SelectTargetRequest(BaseModel):

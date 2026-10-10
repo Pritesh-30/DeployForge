@@ -8,6 +8,7 @@ httpx. Nothing here touches the database or FastAPI.
 from __future__ import annotations
 
 import base64
+from urllib.parse import quote
 from typing import Any
 
 import httpx
@@ -301,3 +302,34 @@ async def dispatch_workflow(
         return False
     raise _write_error(response, "start the build workflow")
 
+
+async def get_file_details(
+    access_token: str, full_name: str, path: str, ref: str
+) -> dict[str, Any] | None:
+    """
+    A file's raw bytes, size and GitHub URL, or None if there is no such file.
+
+    GitHub leaves `content` empty for files over 1 MB; `raw` is then empty and
+    `size` still says how big the file is.
+    """
+    response = await _send(
+        access_token,
+        "GET",
+        f"/repos/{full_name}/contents/{quote(path)}?ref={quote(ref, safe='')}",
+    )
+    if response.status_code == 404:
+        return None
+    if response.status_code >= 400:
+        raise _write_error(response, f"read {path}")
+    body = response.json()
+    if not isinstance(body, dict) or body.get("type") != "file":
+        return None
+    try:
+        raw = base64.b64decode(body.get("content") or "")
+    except ValueError:
+        raw = b""
+    return {
+        "raw": raw,
+        "size": int(body.get("size") or 0),
+        "html_url": body.get("html_url"),
+    }

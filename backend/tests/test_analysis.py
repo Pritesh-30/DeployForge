@@ -452,6 +452,29 @@ async def test_scan_offers_both_halves_of_a_monorepo(
 
 
 @pytest.mark.asyncio
+async def test_scan_includes_a_preview_of_the_repository(
+    client, db_session, user_credentials, monkeypatch, tmp_path
+):
+    """The student sees the files they are deploying, as GitHub shows them."""
+    headers, _ = await _connected(
+        client, db_session, user_credentials, monkeypatch, tmp_path, AMVEX
+    )
+    body = (
+        await client.post(
+            "/repos/scan", json={"full_name": "octocat/hello-world"}, headers=headers
+        )
+    ).json()
+
+    entries = {e["path"]: e["type"] for e in body["preview"]["entries"]}
+    assert entries["backend"] == "dir"
+    assert entries["frontend/package.json"] == "file"
+    # Directories come before files at each level, as on GitHub.
+    top = [e["path"] for e in body["preview"]["entries"] if "/" not in e["path"]]
+    assert top == ["backend", "frontend", "README.md"]
+    assert body["preview"]["readmes"][""]["content"] == "# amvex\n"
+
+
+@pytest.mark.asyncio
 async def test_selecting_a_subdirectory_stores_its_detection(
     client, db_session, user_credentials, monkeypatch, tmp_path
 ):

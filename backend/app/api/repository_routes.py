@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,6 +48,7 @@ from app.detection.detector import (
 )
 from app.github import client as github_client
 from app.github.download import downloaded_repository
+from app.github.preview import build_preview
 from app.github.scan_token import create_scan_token, read_scan_token
 from app.github.token import get_access_token
 from app.models.deployment import BuildMethod, Deployment, DeploymentStatus
@@ -56,6 +57,7 @@ from app.runtime.service import ci_build_abandoned, release_abandoned_ci_build
 from app.schemas.deployment import BuildStartedOut
 from app.schemas.repository import (
     CandidateOut,
+    FilePreviewOut,
     DetectionOut,
     RepositoryOut,
     ScanOut,
@@ -240,6 +242,10 @@ async def scan_repository(
     async with downloaded_repository(access_token, metadata["full_name"], branch) as download:
         candidates = deployable_candidates(scan_candidates(download.path))
         file_count, total_bytes = download.file_count, download.total_bytes
+        # Read from the same download, so the preview costs GitHub nothing.
+        preview = build_preview(
+            download.path, priority_dirs=[c.path for c in candidates]
+        )
 
     # Targets this account has already connected from this repository. A
     # monorepo can have `frontend` taken and `backend` still free, so this is
@@ -285,6 +291,57 @@ async def scan_repository(
             for c in candidates
         ],
         scan_token=scan_token,
+        description=metadata.get("description"),
+        language=metadata.get("language"),
+        private=bool(metadata.get("private")),
+        html_url=metadata.get("html_url"),
+        preview=preview,
+    )
+
+
+# A file larger than this is not shown inline; GitHub has the full view.
+MAX_PREVIEW_FILE_BYTES = 256 * 1024
+
+
+@router.get("/file", response_model=FilePreviewOut)
+async def preview_file(
+    current_user: CurrentUser,
+    db: DbSession,
+    full_name: Annotated[str, Query(max_length=512)],
+    path: Annotated[str, Query(min_length=1, max_length=1024)],
+    ref: Annotated[str, Query(min_length=1, max_length=255)],
+) -> FilePreviewOut:
+    """
+    One file from a repository, for the scan preview's file viewer.
+
+    Fetched with the student's own token, so it can only ever show what they
+    can already read on GitHub.
+    """
+    if ".." in path.split("/") or path.startswith("/"):
+        raise UnknownTargetError("Not a path inside the repository.")
+    access_token = await get_access_token(db, current_user.id)
+    file = await github_client.get_file_details(access_token, full_name, path, ref)
+    if file is None:
+        raise NotFoundError(f"{path} does not exist in {full_name} at {ref[:7]}.")
+
+    raw: bytes = file["raw"]
+    binary = b"\0" in raw[:8000]
+    content = None
+    truncated = False
+    if not binary and raw:
+        try:
+            content = raw[:MAX_PREVIEW_FILE_BYTES].decode("utf-8")
+        except UnicodeDecodeError:
+            binary = True
+        truncated = len(raw) > MAX_PREVIEW_FILE_BYTES
+    return FilePreviewOut(
+        path=path,
+        size=file["size"],
+        content=content,
+        binary=binary,
+        # Too large for the contents API to include at all.
+        truncated=truncated or (not raw and file["size"] > 0),
+        html_url=file["html_url"],
     )
 
 
