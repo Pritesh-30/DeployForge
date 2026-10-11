@@ -33,7 +33,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.builder import diagnose, pack, stack
+from app.builder import diagnose, pack, reuse, stack
 from app.config import settings
 from app.core.crypto import decrypt_value
 from app.core.errors import is_transient
@@ -126,6 +126,7 @@ async def run_build(
     db: AsyncSession | None = None,
     *,
     final_attempt: bool = True,
+    fresh: bool = False,
 ) -> None:
     """
     Build the image for `deployment_id`.
@@ -143,14 +144,14 @@ async def run_build(
     reporting a failure that a minute's patience would have avoided.
     """
     if db is not None:
-        await _run_with_session(db, deployment_id, final_attempt=final_attempt)
+        await _run_with_session(db, deployment_id, final_attempt=final_attempt, fresh=fresh)
         return
     async with AsyncSessionLocal() as own_session:
-        await _run_with_session(own_session, deployment_id, final_attempt=final_attempt)
+        await _run_with_session(own_session, deployment_id, final_attempt=final_attempt, fresh=fresh)
 
 
 async def _run_with_session(
-    db: AsyncSession, deployment_id: uuid.UUID, *, final_attempt: bool = True
+    db: AsyncSession, deployment_id: uuid.UUID, *, final_attempt: bool = True, fresh: bool = False
 ) -> None:
     deployment = await db.get(Deployment, deployment_id)
     if deployment is None:
@@ -168,10 +169,11 @@ async def _run_with_session(
     deployment.build_started_at = datetime.now(timezone.utc)
     deployment.logs_ref = str(log_file)
     deployment.error_message = None
+    deployment.reused_from_id = None
     await db.commit()
 
     try:
-        await _build(db, deployment, repository, log_file)
+        await _build(db, deployment, repository, log_file, fresh=fresh)
     except Exception as exc:  # noqa: BLE001 — never leave a build stuck
         if is_transient(exc) and not final_attempt:
             _append(log_file, f"\nTemporary failure: {exc}. Retrying shortly.\n")
@@ -204,6 +206,8 @@ async def _build(
     deployment: Deployment,
     repository: Repository,
     log_file: Path,
+    *,
+    fresh: bool = False,
 ) -> None:
     """The happy path, with each failure recorded rather than raised."""
     if not await pack.docker_available():
@@ -232,6 +236,16 @@ async def _build(
     )
     image_ref = registry_ref(local_ref)
     env = await _environment_for(db, repository.id)
+
+    # Built from exactly these inputs before? Then that image is this build.
+    if not fresh and not repository.is_multi_service:
+        prior = await reuse.find_reusable(
+            db, repository_id=repository.id, exclude=deployment.id,
+            commit_sha=commit_sha, deploy_path=repository.deploy_path, env=env,
+        )
+        if prior is not None:
+            await _reuse(db, deployment, prior, log_file)
+            return
 
     await record(
         db, deployment.id, "download",
@@ -372,6 +386,10 @@ async def _build(
         db, deployment.id, "build", f"Built {image_ref}.", level=EventLevel.SUCCESS
     )
     await _push(db, deployment, image_ref, log_file)
+    deployment.build_fingerprint = reuse.fingerprint(
+        commit_sha=commit_sha, deploy_path=repository.deploy_path,
+        method=deployment.build_method, env=env,
+    )
 
     await _finish(db, deployment, status=DeploymentStatus.BUILT, image_ref=image_ref)
 
@@ -679,6 +697,30 @@ async def _build_with_buildpacks(
         )
         return True, None
     return False, outcome.error or "The buildpack build failed."
+
+
+async def _reuse(
+    db: AsyncSession, deployment: Deployment, prior: Deployment, log_file: Path
+) -> None:
+    """Finish this build with an identical earlier one's image."""
+    deployment.build_method = prior.build_method
+    deployment.build_fingerprint = prior.build_fingerprint
+    deployment.reused_from_id = prior.id
+    if prior.app_port and not deployment.app_port:
+        deployment.app_port = prior.app_port
+    _append(
+        log_file,
+        f"Nothing to build: deployment {str(prior.id)[:8]} was built from the same commit "
+        f"({(deployment.commit_sha or '')[:12]}) with the same settings.\n"
+        f"Reusing its image {prior.image_ref}.\n\n"
+        "Redeploy with \"Rebuild from scratch\" to build it again anyway.\n",
+    )
+    await _finish(db, deployment, status=DeploymentStatus.BUILT, image_ref=prior.image_ref)
+    await record(
+        db, deployment.id, "build",
+        f"Skipped the build: reused the identical image from deployment {str(prior.id)[:8]}.",
+        level=EventLevel.SUCCESS,
+    )
 
 
 async def _push(

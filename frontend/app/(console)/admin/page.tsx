@@ -10,6 +10,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useLive } from "@/lib/live";
 
 import {
   ChartPanel,
@@ -20,8 +21,8 @@ import {
   StatTile,
   TimeSeries,
 } from "@/components/charts";
-import { AlertIcon, BanIcon, BoxIcon, ChevronRight, CpuIcon, QueueIcon, UsersIcon } from "@/components/Icons";
-import { Badge, Dot, Eyebrow, SectionTitle, Skeleton, cx } from "@/components/ui";
+import { AlertIcon, BanIcon, BoxIcon, CheckIcon, ChevronRight, CpuIcon, QueueIcon, UsersIcon } from "@/components/Icons";
+import { Badge, Dot, Eyebrow, Panel, PanelEmpty, Skeleton, cx } from "@/components/ui";
 import {
   adminApps,
   getAnalytics,
@@ -42,6 +43,10 @@ export default function AdminOverview() {
   const [apps, setApps] = useState<App[] | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
+  // Re-read the moment the server reports a change (lib/live.ts).
+  const [liveTick, setLiveTick] = useState(0);
+  useLive(() => setLiveTick((n) => n + 1));
+
   useEffect(() => {
     let active = true;
     const load = () => {
@@ -60,7 +65,7 @@ export default function AdminOverview() {
       active = false;
       clearInterval(t);
     };
-  }, []);
+  }, [liveTick]);
 
   const latest = host?.latest;
   const attention = (apps ?? []).filter((a) => {
@@ -115,98 +120,98 @@ export default function AdminOverview() {
       </div>
 
       {/* --- Machine -------------------------------------------------------- */}
-      <div className="grid gap-4 lg:grid-cols-[1.6fr_1fr]">
+      <div className="grid gap-4 lg:h-[19rem] lg:grid-cols-[1.6fr_1fr]">
         <ChartPanel title="Machine CPU" value={latest ? percent(latest.cpu) : "—"}
           caption={latest?.cpus ? `${latest.cpus} cores · last hour` : "last hour"}>
           <TimeSeries domain={[now - 3_600_000, now]}
             series={[{ key: "cpu", label: "CPU", points: host?.series.cpu ?? [] }]}
-            format={(v, d) => `${v.toFixed(d ?? 1)}%`} height={190} />
+            format={(v, d) => `${v.toFixed(d ?? 1)}%`} />
         </ChartPanel>
-        <div className="plate flex flex-col gap-5 p-5">
+        <Panel title="Memory in use" icon={<CpuIcon className="h-4 w-4" />}
+          action={<Link href="/admin/infrastructure" className="inline-flex items-center gap-1 font-medium text-[var(--text-muted)] hover:text-[var(--text)]">
+            Containers <ChevronRight className="h-3.5 w-3.5" /></Link>}
+          bodyClassName="flex flex-col justify-between gap-4">
           <div>
-            <div className="flex items-baseline justify-between">
-              <p className="text-[13px] font-medium text-[var(--text-muted)]">Memory in use</p>
-              <CpuIcon className="h-4 w-4 text-[var(--text-dim)]" />
-            </div>
-            <p className="mt-1 text-2xl font-semibold">{latest ? bytes(latest.mem) : "—"}</p>
-            <p className="mt-1 text-xs text-[var(--text-dim)]">of {latest?.mem_total ? bytes(latest.mem_total) : "—"} available to Docker</p>
+            <p className="tabular text-[22px] font-semibold leading-none">{latest ? bytes(latest.mem) : "—"}</p>
+            <p className="mt-1.5 text-xs text-[var(--text-dim)]">of {latest?.mem_total ? bytes(latest.mem_total) : "—"} available to Docker</p>
             <Meter className="mt-3" value={latest?.mem ?? 0} max={latest?.mem_total || 1} />
           </div>
-          <div className="grid grid-cols-2 gap-4 border-t border-[var(--hairline)] pt-4 text-sm">
-            <div><p className="text-xs text-[var(--text-dim)]">Containers</p><p className="mt-1 text-lg font-semibold">{latest?.containers ?? "—"}</p></div>
-            <div><p className="text-xs text-[var(--text-dim)]">Deployments</p><p className="mt-1 text-lg font-semibold">{analytics?.deployments ?? "—"}</p></div>
-            <div><p className="text-xs text-[var(--text-dim)]">Failed</p><p className="mt-1 text-lg font-semibold text-[var(--danger)]">{analytics?.failed ?? "—"}</p></div>
-            <div><p className="text-xs text-[var(--text-dim)]">Stopped</p><p className="mt-1 text-lg font-semibold">{analytics?.stopped ?? "—"}</p></div>
-          </div>
-          <Link href="/admin/infrastructure" className="mt-auto inline-flex items-center gap-1 text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text)]">
-            Containers and disk <ChevronRight className="h-3.5 w-3.5" />
-          </Link>
-        </div>
+          <dl className="grid grid-cols-4 gap-3 border-t border-[var(--hairline)] pt-4 text-sm">
+            {[
+              ["Containers", latest?.containers ?? "—", ""],
+              ["Deploys", analytics?.deployments ?? "—", ""],
+              ["Failed", analytics?.failed ?? "—", "text-[var(--danger)]"],
+              ["Stopped", analytics?.stopped ?? "—", ""],
+            ].map(([label, value, tone]) => (
+              <div key={String(label)}>
+                <dt className="text-[11px] text-[var(--text-dim)]">{label}</dt>
+                <dd className={cx("tabular mt-1 text-lg font-semibold", String(tone))}>{value}</dd>
+              </div>
+            ))}
+          </dl>
+        </Panel>
       </div>
 
-      {/* --- Attention + activity ------------------------------------------- */}
-      <div className="grid gap-6 lg:grid-cols-[1fr_1.4fr]">
-        <section>
-          <SectionTitle hint="Apps that failed or are suspended. Everything else is fine.">Needs attention</SectionTitle>
-          {apps === null ? <Skeleton className="h-48" /> : attention.length === 0 ? (
-            <div className="plate flex items-center gap-3 px-5 py-6 text-sm text-[var(--text-muted)]">
-              <Dot tone="ok" /> Nothing is failing right now.
-            </div>
+      {/* --- Attention + deploys ------------------------------------------- */}
+      <div className="grid gap-4 lg:h-[22rem] lg:grid-cols-[1fr_1.4fr]">
+        <Panel title="Needs attention" hint="Failed or suspended apps. Everything else is fine." flush
+          action={<Link href="/admin/apps" className="font-medium text-[var(--text-muted)] hover:text-[var(--text)]">All apps →</Link>}>
+          {apps === null ? <div className="p-5"><Skeleton className="h-40" /></div> : attention.length === 0 ? (
+            <PanelEmpty icon={<CheckIcon className="h-6 w-6 text-[var(--ok)]" />} title="Nothing is failing right now">
+              Failed builds, apps that crash on start, and suspended apps appear here.
+            </PanelEmpty>
           ) : (
-            <ul className="plate divide-y divide-[var(--hairline)] overflow-hidden">
-              {attention.slice(0, 8).map((a) => {
-                const s = appState(a);
+            <ul className="divide-y divide-[var(--hairline)]">
+              {attention.map((a) => {
+                const st = appState(a);
                 return (
                   <li key={a.id}>
                     <Link href={`/admin/apps/${a.id}`} className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-[var(--surface-2)]">
-                      {s.label === "Suspended" ? <BanIcon className="h-4 w-4 shrink-0 text-[var(--danger)]" /> : <AlertIcon className="h-4 w-4 shrink-0 text-[var(--danger)]" />}
+                      {st.label === "Suspended" ? <BanIcon className="h-4 w-4 shrink-0 text-[var(--danger)]" /> : <AlertIcon className="h-4 w-4 shrink-0 text-[var(--danger)]" />}
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-medium">{a.target_label}</p>
-                        <p className="truncate text-xs text-[var(--text-dim)]">{a.owner_email} · {a.current?.error_message ?? s.label}</p>
+                        <p className="truncate text-xs text-[var(--text-dim)]">{a.owner_email} · {a.current?.error_message ?? st.label}</p>
                       </div>
-                      <Badge tone="danger">{s.label}</Badge>
+                      <Badge tone="danger">{st.label}</Badge>
                     </Link>
                   </li>
                 );
               })}
             </ul>
           )}
-        </section>
+        </Panel>
 
         <ChartPanel title="Deployments per day" value={analytics ? analytics.daily.reduce((n, d) => n + d.count, 0) : "—"}
           caption="last 14 days">
           <StackedBars days={(analytics?.daily ?? []).map((d) => d.date)}
             parts={[{ key: "d", label: "Deployments", color: "var(--series-1)", values: (analytics?.daily ?? []).map((d) => d.count) }]}
-            height={170} />
+          />
         </ChartPanel>
       </div>
 
       {/* --- Breakdown ---------------------------------------------------- */}
-      <div className="grid gap-4 lg:grid-cols-3">
-        <div className="plate p-5">
-          <p className="mb-4 text-[13px] font-medium text-[var(--text-muted)]">How apps are built</p>
-          {analytics ? (
+      <div className="grid gap-4 lg:h-[15rem] lg:grid-cols-3">
+        <Panel title="How apps are built">
+          {analytics ? (Object.keys(analytics.by_method).length ? (
             <ProportionBar items={Object.entries(analytics.by_method).map(([k, v]) => ({
               label: k === "docker" ? "Dockerfile" : k === "compose" ? "Compose" : k === "buildpack" ? "Buildpacks" : k, value: v,
             }))} />
-          ) : <Skeleton className="h-12" />}
-        </div>
-        <div className="plate p-5">
-          <p className="mb-4 text-[13px] font-medium text-[var(--text-muted)]">Frameworks</p>
-          {analytics ? (
+          ) : <PanelEmpty title="No builds yet" />) : <Skeleton className="h-12" />}
+        </Panel>
+        <Panel title="Frameworks">
+          {analytics ? (Object.keys(analytics.by_framework).length ? (
             <ProportionBar items={Object.entries(analytics.by_framework).map(([k, v]) => ({ label: frameworkName(k), value: v }))} />
-          ) : <Skeleton className="h-12" />}
-        </div>
-        <div className="plate p-5">
-          <p className="mb-4 text-[13px] font-medium text-[var(--text-muted)]">Busiest students</p>
+          ) : <PanelEmpty title="None detected yet" />) : <Skeleton className="h-12" />}
+        </Panel>
+        <Panel title="Busiest students">
           {analytics ? (
             analytics.top_users.length ? (
-              <RankedBars rows={analytics.top_users.slice(0, 5).map((u) => ({
+              <RankedBars rows={analytics.top_users.slice(0, 8).map((u) => ({
                 label: u.email, value: u.deployments, hint: <span className={cx(u.running > 0 && "text-[var(--ok)]")}>· {u.running} live</span>,
               }))} format={(v) => `${v} deploys`} />
-            ) : <p className="text-sm text-[var(--text-dim)]">No deployments yet.</p>
+            ) : <PanelEmpty title="No deployments yet" />
           ) : <Skeleton className="h-32" />}
-        </div>
+        </Panel>
       </div>
     </div>
   );

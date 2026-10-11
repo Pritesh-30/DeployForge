@@ -7,6 +7,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import { Select } from "@/components/Controls";
 import { useEffect, useState } from "react";
 
 import { useApp } from "@/components/app/AppFrame";
@@ -20,6 +21,7 @@ import { frameworkName } from "@/lib/github";
 export default function AppSettings() {
   const { app, api, act, pending, reload } = useApp();
   const { meta } = useSession();
+  const pushCapable = !!meta?.push_deploys;
   const router = useRouter();
   const [branches, setBranches] = useState<string[] | null>(null);
   const [branch, setBranch] = useState(app.default_branch);
@@ -57,18 +59,19 @@ export default function AppSettings() {
     <div className="space-y-6">
       <Section title="Source" description="Which branch this app is built from. A change takes effect on the next deploy.">
         <div className="flex flex-wrap items-end gap-3">
-          <label className="block">
+          <div className="block">
             <span className="mb-1.5 flex items-center gap-1.5 text-xs text-[var(--text-dim)]"><BranchIcon className="h-3.5 w-3.5" />Branch</span>
             {branches && branches.length > 0 ? (
-              <select value={branch} onChange={(e) => setBranch(e.target.value)}
-                className="min-w-56 rounded-[var(--r-sm)] border border-[var(--hairline-strong)] bg-[var(--surface-2)] px-3 py-2 text-sm outline-none">
-                {branches.map((b) => <option key={b} value={b}>{b}</option>)}
-              </select>
+              <Select ariaLabel="Branch" className="min-w-56" value={branch} onChange={setBranch}
+                options={branches.map((b) => ({
+                  value: b, text: b, label: b,
+                  hint: b === app.default_branch ? "Deploys from here now" : undefined,
+                }))} />
             ) : (
               <input value={branch} onChange={(e) => setBranch(e.target.value)}
                 className="min-w-56 rounded-[var(--r-sm)] border border-[var(--hairline-strong)] bg-[var(--surface-2)] px-3 py-2 text-sm outline-none" />
             )}
-          </label>
+          </div>
           <Button onClick={() => save({ branch }, `Now deploying from ${branch}.`)} loading={saving}
             disabled={branch === app.default_branch || !branch}>
             Save branch
@@ -84,14 +87,24 @@ export default function AppSettings() {
           <div>
             <p className="text-sm font-medium">Deploy on push to {app.default_branch}</p>
             <p className="text-xs text-[var(--text-dim)]">
-              {meta?.build_backend === "actions"
-                ? "Pushes run the DeployForge workflow in your repository's GitHub Actions."
-                : "This server builds on the Deploy button; push deploys need the GitHub Actions build backend."}
+              {pushCapable
+                ? meta?.build_backend === "actions"
+                  ? "A push builds in your repository's GitHub Actions, then goes live here."
+                  : "A push reaches this server through a GitHub webhook, is built here, and goes live."
+                : "Not available right now: GitHub cannot reach this server. Use Redeploy after pushing."}
             </p>
           </div>
-          <Switch on={app.auto_deploy} disabled={saving}
+          {/* Shown off, not merely disabled-on: a switch saying "on" while
+              pushes do nothing is exactly the confusion to avoid. */}
+          <Switch on={pushCapable && app.auto_deploy} disabled={saving || !pushCapable}
             onChange={(on) => save({ auto_deploy: on }, on ? "Push deploys turned on." : "Push deploys turned off.")} />
         </div>
+        {!pushCapable && (
+          <p className="mt-3 text-xs leading-relaxed text-[var(--text-dim)]">
+            Push deploys need GitHub to be able to reach this server.
+            {" "}Whoever runs the server can turn that on (on a laptop: <code>scripts\dev.ps1 tunnel</code>).
+          </p>
+        )}
       </Section>
 
       <Section title="Domain" description="Where the app answers. Assigned by the platform, stable across redeploys and rollbacks.">

@@ -26,19 +26,24 @@ export const SERIES = ["var(--series-1)", "var(--series-2)", "var(--series-3)", 
 
 /* --- Sizing ------------------------------------------------------------- */
 
-/** The element's width, kept current as the layout changes. */
-function useWidth<T extends HTMLElement>(): [React.RefObject<T | null>, number] {
+/** The element's size, kept current as the layout changes. */
+function useSize<T extends HTMLElement>(): [React.RefObject<T | null>, number, number] {
   const ref = useRef<T | null>(null);
-  const [width, setWidth] = useState(0);
+  const [size, setSize] = useState({ width: 0, height: 0 });
   useEffect(() => {
     const node = ref.current;
     if (!node) return;
-    const observer = new ResizeObserver(([entry]) => setWidth(Math.round(entry.contentRect.width)));
+    const observer = new ResizeObserver(([entry]) =>
+      setSize({ width: Math.round(entry.contentRect.width), height: Math.round(entry.contentRect.height) }),
+    );
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
-  return [ref, width];
+  return [ref, size.width, size.height];
 }
+
+/** Charts without a fixed height fill their container, never below this. */
+const MIN_FILL_HEIGHT = 120;
 
 /* --- Scales ------------------------------------------------------------- */
 
@@ -87,7 +92,7 @@ export type Series = { key: string; label: string; points: Point[]; color?: stri
 export function TimeSeries({
   series,
   format,
-  height = 200,
+  height: fixedHeight,
   domain,
   yMax,
   integer = false,
@@ -101,6 +106,7 @@ export function TimeSeries({
    * read "0%"; in the readout it is not, and picks its own.
    */
   format: (value: number, decimals?: number) => string;
+  /** Fixed height in px. Omit to fill the container's height. */
   height?: number;
   /** The time window shown, [start, end] in ms — so an hour reads as an hour. */
   domain?: [number, number];
@@ -111,7 +117,8 @@ export function TimeSeries({
   area?: boolean;
   empty?: ReactNode;
 }) {
-  const [ref, width] = useWidth<HTMLDivElement>();
+  const [ref, width, measured] = useSize<HTMLDivElement>();
+  const height = fixedHeight ?? Math.max(MIN_FILL_HEIGHT, measured);
   const gradientId = useId();
   const [hover, setHover] = useState<number | null>(null);
 
@@ -186,7 +193,8 @@ export function TimeSeries({
       : null;
 
   return (
-    <div ref={ref} className="relative w-full" style={{ height }}>
+    <div ref={ref} className={cx("relative w-full", fixedHeight == null && "h-full")}
+      style={fixedHeight != null ? { height: fixedHeight } : { minHeight: MIN_FILL_HEIGHT }}>
       {colored.length > 1 && (
         <div className="absolute right-0 top-[-1.75rem] flex gap-3 text-[11px] text-[var(--text-muted)]">
           {colored.map((s) => (
@@ -366,13 +374,15 @@ export type Stack = { label: string; values: number[] };
 export function StackedBars({
   days,
   parts,
-  height = 160,
+  height: fixedHeight,
 }: {
   days: string[];
   parts: { key: string; label: string; color: string; values: number[] }[];
+  /** Fixed height in px. Omit to fill the container's height. */
   height?: number;
 }) {
-  const [ref, width] = useWidth<HTMLDivElement>();
+  const [ref, width, measured] = useSize<HTMLDivElement>();
+  const height = fixedHeight ?? Math.max(MIN_FILL_HEIGHT, measured);
   const [hover, setHover] = useState<number | null>(null);
   const totals = days.map((_, i) => parts.reduce((sum, p) => sum + (p.values[i] ?? 0), 0));
   const ticks = niceTicks(Math.max(1, ...totals), 3, true);
@@ -386,7 +396,8 @@ export function StackedBars({
   const sy = (v: number) => pad.top + innerH - (v / top) * innerH;
 
   return (
-    <div ref={ref} className="relative w-full" style={{ height }}>
+    <div ref={ref} className={cx("relative w-full", fixedHeight == null && "h-full")}
+      style={fixedHeight != null ? { height: fixedHeight } : { minHeight: MIN_FILL_HEIGHT }}>
       <div className="absolute right-0 top-[-1.75rem] flex gap-3 text-[11px] text-[var(--text-muted)]">
         {parts.map((p) => (
           <span key={p.key} className="inline-flex items-center gap-1.5">
@@ -619,29 +630,42 @@ export function StatTile({
 
 /* --- Chart card --------------------------------------------------------- */
 
+/**
+ * A chart in a panel, with the same header geometry as `Panel` — so a chart
+ * and a list sitting side by side line up exactly — plus the headline number
+ * the chart is about. The chart fills whatever height the row gives it.
+ */
 export function ChartPanel({
   title,
   value,
   caption,
   children,
+  footer,
   className,
 }: {
   title: string;
   value?: ReactNode;
   caption?: ReactNode;
   children: ReactNode;
+  footer?: ReactNode;
   className?: string;
 }) {
   return (
-    <div className={cx("plate px-5 pb-4 pt-4", className)}>
-      <div className="mb-8 flex items-start justify-between gap-4">
+    <section className={cx("plate flex min-h-0 flex-col overflow-hidden", className)}>
+      <header className="flex shrink-0 items-start justify-between gap-4 border-b border-[var(--hairline)] px-5 py-3.5">
         <div className="min-w-0">
-          <p className="text-[13px] font-medium text-[var(--text-muted)]">{title}</p>
-          {value != null && <p className="mt-1 text-2xl font-semibold leading-none">{value}</p>}
+          <h2 className="text-[14px] font-semibold">{title}</h2>
+          {value != null && <p className="tabular mt-1 text-[22px] font-semibold leading-none">{value}</p>}
         </div>
-        {caption && <div className="shrink-0 text-right text-xs text-[var(--text-dim)]">{caption}</div>}
-      </div>
-      {children}
-    </div>
+        {caption && <div className="shrink-0 text-right text-xs leading-relaxed text-[var(--text-dim)]">{caption}</div>}
+      </header>
+      {/* The chart takes all the height the row gives the panel. */}
+      <div className="min-h-0 flex-1 px-5 pb-4 pt-9">{children}</div>
+      {footer && (
+        <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-[var(--hairline)] px-5 py-2.5 text-xs text-[var(--text-dim)]">
+          {footer}
+        </footer>
+      )}
+    </section>
   );
 }

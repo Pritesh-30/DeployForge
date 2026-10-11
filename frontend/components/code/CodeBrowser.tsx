@@ -16,6 +16,7 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { Select } from "@/components/Controls";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import Highlighted from "@/components/code/Highlighted";
@@ -33,7 +34,7 @@ import {
   RocketIcon,
   SearchIcon,
 } from "@/components/Icons";
-import { Alert, Badge, Mono, Skeleton, cx, relativeTime } from "@/components/ui";
+import { Alert, Badge, Mono, Skeleton, WORKSPACE_HEIGHT, cx, relativeTime } from "@/components/ui";
 import {
   codeCommits,
   codeFile,
@@ -129,11 +130,12 @@ export default function CodeBrowser({ appId }: { appId: string }) {
   }
   if (!summary || !tree) {
     return (
-      <div className="space-y-4">
+      <div className="space-y-3">
         <Skeleton className="h-14" />
-        <div className="grid gap-4 lg:grid-cols-[17rem_1fr]">
-          <Skeleton className="h-[32rem]" />
-          <Skeleton className="h-[32rem]" />
+        <div className={cx("grid gap-3 lg:grid-cols-[16rem_1fr] xl:grid-cols-[16rem_1fr_17rem]", WORKSPACE_HEIGHT)}>
+          <Skeleton className="h-full" />
+          <Skeleton className="h-full" />
+          <Skeleton className="hidden h-full xl:block" />
         </div>
       </div>
     );
@@ -145,28 +147,80 @@ export default function CodeBrowser({ appId }: { appId: string }) {
   const repo = summary.repository;
   const deployRoots = new Set([...(summary.service_paths ?? []), summary.deploy_path ?? ""].filter(Boolean));
 
+  const about = (
+    <>
+      <div>
+        <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--text-dim)]">About</p>
+        <p className="mt-2 text-sm leading-relaxed">{repo.description || <span className="text-[var(--text-dim)]">No description.</span>}</p>
+        {repo.topics.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-1.5">{repo.topics.map((t) => <Badge key={t} tone="info">{t}</Badge>)}</div>
+        )}
+        <dl className="mt-4 grid grid-cols-2 gap-y-2 text-xs">
+          <dt className="text-[var(--text-dim)]">Stars</dt><dd className="tabular text-right">{compact(repo.stars)}</dd>
+          <dt className="text-[var(--text-dim)]">Forks</dt><dd className="tabular text-right">{compact(repo.forks)}</dd>
+          <dt className="text-[var(--text-dim)]">Open issues</dt><dd className="tabular text-right">{compact(repo.open_issues)}</dd>
+          <dt className="text-[var(--text-dim)]">Size</dt><dd className="tabular text-right">{bytes(repo.size_kb * 1024, 0)}</dd>
+          {repo.license && <><dt className="text-[var(--text-dim)]">License</dt><dd className="text-right">{repo.license}</dd></>}
+          <dt className="text-[var(--text-dim)]">Visibility</dt><dd className="text-right">{repo.private ? "Private" : "Public"}</dd>
+        </dl>
+      </div>
+      <div className="border-t border-[var(--hairline)] pt-4">
+        <p className="mb-3 text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--text-dim)]">Languages</p>
+        {summary.languages.length ? (
+          <ProportionBar items={summary.languages.map((l) => ({ label: l.name, value: l.bytes }))} />
+        ) : <p className="text-sm text-[var(--text-dim)]">Not classified by GitHub.</p>}
+      </div>
+      {deployRoots.size > 0 && (
+        <div className="border-t border-[var(--hairline)] pt-4">
+          <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--text-dim)]">Deployed from</p>
+          <ul className="space-y-1.5">
+            {[...deployRoots].map((r) => (
+              <li key={r}>
+                <button onClick={() => navigate({ path: r })} className="inline-flex items-center gap-1.5 text-sm text-[var(--accent)] hover:underline">
+                  <RocketIcon className="h-3.5 w-3.5" />{r}/
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <a href={repo.html_url} target="_blank" rel="noreferrer"
+        className="mt-auto inline-flex items-center gap-1.5 text-xs text-[var(--text-muted)] hover:text-[var(--text)]">
+        Open on GitHub <ExternalIcon className="h-3 w-3" />
+      </a>
+    </>
+  );
+
   return (
-    <div className="space-y-4">
-      {/* --- Repository bar --------------------------------------------- */}
-      <div className="plate flex flex-col gap-4 p-4 lg:flex-row lg:items-center">
+    <div className="space-y-3">
+      {/* --- Repository bar ----------------------------------------------- */}
+      <div className="plate flex flex-col gap-3 px-4 py-3 lg:flex-row lg:items-center">
         <div className="flex flex-wrap items-center gap-2">
-          <label className="inline-flex items-center gap-2 rounded-[var(--r-sm)] border border-[var(--hairline-strong)] bg-[var(--surface-2)] px-2.5 py-1.5 text-sm">
-            <BranchIcon className="h-3.5 w-3.5 text-[var(--text-dim)]" />
-            <select value={ref || summary.branch} onChange={(e) => navigate({ ref: e.target.value === summary.branch ? "" : e.target.value, path: "" })}
-              className="bg-transparent outline-none">
-              {summary.branches.map((b) => (
-                <option key={b.name} value={b.name}>{b.name}{b.name === summary.branch ? " (deploys)" : ""}</option>
-              ))}
-              {ref && !summary.branches.some((b) => b.name === ref) && <option value={ref}>{ref.slice(0, 12)}</option>}
-            </select>
-          </label>
+          <Select
+            ariaLabel="Branch"
+            icon={<BranchIcon className="h-3.5 w-3.5" />}
+            className="min-w-44"
+            menuClassName="w-64"
+            value={ref || summary.branch}
+            onChange={(v) => navigate({ ref: v === summary.branch ? "" : v, path: "" })}
+            options={[
+              ...summary.branches.map((b) => ({
+                value: b.name,
+                text: b.name,
+                label: b.name,
+                hint: b.name === summary.branch ? "Deploys from here" : undefined,
+              })),
+              ...(ref && !summary.branches.some((b) => b.name === ref)
+                ? [{ value: ref, text: ref, label: <span className="font-[family-name:var(--font-jetbrains-mono)]">{ref.slice(0, 12)}</span>, hint: "Commit" }]
+                : []),
+            ]}
+          />
           <span className="text-xs text-[var(--text-dim)]">{summary.branches.length} branch{summary.branches.length === 1 ? "" : "es"}</span>
           <button onClick={() => setFinder(true)}
             className="inline-flex items-center gap-2 rounded-[var(--r-sm)] border border-[var(--hairline)] px-2.5 py-1.5 text-xs text-[var(--text-muted)] transition-colors hover:border-[var(--hairline-strong)] hover:text-[var(--text)]">
             <SearchIcon className="h-3.5 w-3.5" />Go to file<kbd className="rounded border border-[var(--hairline-strong)] px-1 text-[10px]">t</kbd>
           </button>
         </div>
-
         {summary.head && (
           <div className="flex min-w-0 flex-1 items-center gap-2.5 text-sm lg:justify-end">
             {summary.head.avatar_url && (
@@ -181,80 +235,50 @@ export default function CodeBrowser({ appId }: { appId: string }) {
             <span className="shrink-0 text-xs text-[var(--text-dim)]">{relativeTime(summary.head.date)}</span>
             <button onClick={() => setShowHistory((h) => !h)}
               className={cx("inline-flex shrink-0 items-center gap-1.5 rounded-[var(--r-sm)] border px-2.5 py-1 text-xs transition-colors",
-                showHistory ? "border-[var(--accent-line)] text-[var(--accent)]" : "border-[var(--hairline)] text-[var(--text-muted)] hover:text-[var(--text)]")}>
+                showHistory ? "border-[var(--accent-line)] bg-[var(--accent-soft)] text-[var(--accent)]" : "border-[var(--hairline)] text-[var(--text-muted)] hover:text-[var(--text)]")}>
               <HistoryIcon className="h-3.5 w-3.5" />History
             </button>
           </div>
         )}
       </div>
 
-      {showHistory && <CommitHistory appId={appId} refName={summary.sha} path={path} fullName={repo.full_name} />}
-
-      <div className="grid gap-4 lg:grid-cols-[17rem_1fr]">
-        {/* --- Tree --------------------------------------------------------- */}
-        <aside className="plate thin-scroll max-h-[44rem] overflow-y-auto p-2 lg:sticky lg:top-6 lg:self-start">
-          <Tree
-            childrenOf={children}
-            dir=""
-            depth={0}
-            current={path}
-            deployRoots={deployRoots}
-            onOpen={(p) => navigate({ path: p })}
-          />
-          {tree.truncated && (
-            <p className="px-2 py-2 text-[11px] text-[var(--text-dim)]">The repository is very large; some files are not listed.</p>
-          )}
+      {/* --- Workspace: three columns, each scrolling on its own ---------- */}
+      <div className={cx("grid gap-3 lg:grid-cols-[16rem_minmax(0,1fr)] xl:grid-cols-[16rem_minmax(0,1fr)_17rem]", WORKSPACE_HEIGHT)}>
+        <aside className="plate hidden min-h-0 flex-col overflow-hidden lg:flex">
+          <div className="flex shrink-0 items-center justify-between border-b border-[var(--hairline)] px-4 py-2.5">
+            <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--text-dim)]">Files</p>
+            <span className="tabular text-[11px] text-[var(--text-dim)]">{tree.entries.filter((e) => e.type === "file").length.toLocaleString()}</span>
+          </div>
+          <div className="thin-scroll min-h-0 flex-1 overflow-y-auto p-2">
+            <Tree childrenOf={children} dir="" depth={0} current={path} deployRoots={deployRoots} onOpen={(p) => navigate({ path: p })} />
+            {tree.truncated && <p className="px-2 py-2 text-[11px] text-[var(--text-dim)]">Very large repository; some files are not listed.</p>}
+          </div>
         </aside>
 
-        {/* --- Main pane ---------------------------------------------------- */}
-        <section className="min-w-0 space-y-4">
-          <Breadcrumb name={repo.full_name.split("/")[1]} path={path} onOpen={(p) => navigate({ path: p })} />
-          {isFile ? (
-            <FilePane appId={appId} refName={summary.sha} path={path} fullName={repo.full_name} isPrivate={repo.private}
-              onOpen={(p) => navigate({ path: p })} />
-          ) : (
-            <>
-              <DirectoryListing
-                entries={children.get(directory) ?? []}
-                parent={directory ? parentOf(directory) : null}
-                deployRoots={deployRoots}
-                onOpen={(p) => navigate({ path: p })}
-              />
-              <Readme appId={appId} refName={summary.sha} dir={directory} fullName={repo.full_name} isPrivate={repo.private}
-                onOpen={(p) => navigate({ path: p })} />
-            </>
-          )}
-        </section>
-      </div>
-
-      {/* --- About ---------------------------------------------------------- */}
-      <div className="grid gap-4 lg:grid-cols-[1fr_1fr]">
-        <div className="plate p-5">
-          <p className="text-[13px] font-medium text-[var(--text-muted)]">About</p>
-          <p className="mt-2 text-sm leading-relaxed">{repo.description || <span className="text-[var(--text-dim)]">No description.</span>}</p>
-          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-[var(--text-dim)]">
-            <span>★ {compact(repo.stars)}</span>
-            <span>{compact(repo.forks)} forks</span>
-            <span>{compact(repo.open_issues)} open issues</span>
-            {repo.license && <span>{repo.license}</span>}
-            <span>{bytes(repo.size_kb * 1024, 0)}</span>
-            <Badge>{repo.private ? "Private" : "Public"}</Badge>
-            <a href={repo.html_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:text-[var(--text)]">
-              GitHub <ExternalIcon className="h-3 w-3" />
-            </a>
+        <section className="plate flex min-h-0 flex-col overflow-hidden">
+          <div className="flex shrink-0 items-center gap-3 border-b border-[var(--hairline)] px-4 py-2.5">
+            <Breadcrumb name={repo.full_name.split("/")[1]} path={path} onOpen={(p) => navigate({ path: p })} />
           </div>
-          {repo.topics.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-1.5">
-              {repo.topics.map((t) => <Badge key={t} tone="info">{t}</Badge>)}
-            </div>
-          )}
-        </div>
-        <div className="plate p-5">
-          <p className="mb-4 text-[13px] font-medium text-[var(--text-muted)]">Languages</p>
-          {summary.languages.length ? (
-            <ProportionBar items={summary.languages.map((l) => ({ label: l.name, value: l.bytes }))} />
-          ) : <p className="text-sm text-[var(--text-dim)]">GitHub has not classified any code here.</p>}
-        </div>
+          <div className="thin-scroll min-h-0 flex-1 overflow-y-auto">
+            {showHistory ? (
+              <CommitHistory appId={appId} refName={summary.sha} path={path} fullName={repo.full_name} />
+            ) : isFile ? (
+              <FilePane appId={appId} refName={summary.sha} path={path} fullName={repo.full_name} isPrivate={repo.private}
+                onOpen={(p) => navigate({ path: p })} />
+            ) : (
+              <>
+                <DirectoryListing entries={children.get(directory) ?? []} parent={directory ? parentOf(directory) : null}
+                  deployRoots={deployRoots} onOpen={(p) => navigate({ path: p })} />
+                <Readme appId={appId} refName={summary.sha} dir={directory} fullName={repo.full_name} isPrivate={repo.private}
+                  onOpen={(p) => navigate({ path: p })} />
+                {/* Below xl the about rail has no column of its own. */}
+                <div className="space-y-4 border-t border-[var(--hairline)] p-5 xl:hidden">{about}</div>
+              </>
+            )}
+          </div>
+        </section>
+
+        <aside className="plate thin-scroll hidden min-h-0 flex-col gap-4 overflow-y-auto p-5 xl:flex">{about}</aside>
       </div>
 
       {finder && (
@@ -263,6 +287,7 @@ export default function CodeBrowser({ appId }: { appId: string }) {
           onClose={() => setFinder(false)}
           onOpen={(p) => {
             setFinder(false);
+            setShowHistory(false);
             navigate({ path: p });
           }}
         />
@@ -388,8 +413,8 @@ function DirectoryListing({
   onOpen: (p: string) => void;
 }) {
   return (
-    <div className="plate overflow-hidden">
-      <ul className="divide-y divide-[var(--hairline)]">
+    <div>
+      <ul className="divide-y divide-[var(--hairline)] border-b border-[var(--hairline)]">
         {parent !== null && (
           <li>
             <button onClick={() => onOpen(parent)} className="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm text-[var(--text-muted)] hover:bg-[var(--surface-2)]">
@@ -429,8 +454,8 @@ function Readme({ appId, refName, dir, fullName, isPrivate, onOpen }: {
 
   if (!readme?.content) return null;
   return (
-    <div className="plate overflow-hidden">
-      <div className="flex items-center gap-2 border-b border-[var(--hairline)] px-4 py-2.5 text-sm font-medium">
+    <div>
+      <div className="flex items-center gap-2 border-b border-[var(--hairline)] bg-[var(--surface)] px-4 py-2.5 text-sm font-medium">
         <BookIcon className="h-4 w-4 text-[var(--text-dim)]" />{readme.name}
       </div>
       <div className="px-6 py-5">
@@ -469,8 +494,9 @@ function FilePane({ appId, refName, path, fullName, isPrivate, onOpen }: {
   const isMarkdown = MARKDOWN.test(path);
 
   return (
-    <div className="plate overflow-hidden">
-      <div className="flex flex-wrap items-center gap-3 border-b border-[var(--hairline)] px-4 py-2.5 text-xs text-[var(--text-muted)]">
+    <div>
+      {/* Sticks to the top of the scrolling column while the file scrolls under it. */}
+      <div className="sticky top-0 z-10 flex flex-wrap items-center gap-3 border-b border-[var(--hairline)] bg-[var(--surface)] px-4 py-2 text-xs text-[var(--text-muted)]">
         {data && !data.binary && !data.too_large && <span className="tabular">{lines.toLocaleString()} lines</span>}
         {data && <span className="tabular">{bytes(data.size)}</span>}
         {data && <Badge>{data.language}</Badge>}
@@ -551,12 +577,12 @@ function CommitHistory({ appId, refName, path, fullName }: { appId: string; refN
 
   const commits = pages.flat();
   return (
-    <div className="plate overflow-hidden">
-      <div className="flex items-center gap-2 border-b border-[var(--hairline)] px-4 py-2.5 text-sm font-medium">
+    <div>
+      <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-[var(--hairline)] bg-[var(--surface)] px-4 py-2.5 text-sm font-medium">
         <HistoryIcon className="h-4 w-4 text-[var(--text-dim)]" />
         Commits {path ? <>to <Mono>{path}</Mono></> : "on this branch"}
       </div>
-      <ol className="thin-scroll max-h-80 divide-y divide-[var(--hairline)] overflow-y-auto">
+      <ol className="divide-y divide-[var(--hairline)]">
         {commits.map((c) => (
           <li key={c.sha} className="flex items-center gap-3 px-4 py-2.5 text-sm">
             <CommitIcon className="h-4 w-4 shrink-0 text-[var(--text-dim)]" />

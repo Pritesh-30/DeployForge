@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.builder import diagnose
+from app.builder import diagnose, stack
 from app.config import settings
 from app.core.crypto import decrypt_value
 from app.core.errors import AppError
@@ -32,6 +32,7 @@ from app.models.event import DeploymentEvent, EventLevel
 from app.models.repository import Repository
 from app.models.user import User
 from app.runtime import compose, docker, naming, ports, registry
+from app.services import environment_state
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,22 @@ async def record(
             await db.commit()
     except Exception:  # noqa: BLE001 — the timeline is not worth a failure
         logger.warning("Could not record %s event for %s", stage, deployment_id)
+        return
+
+    # Every open console showing this app hears about it now (app/runtime/live.py).
+    if commit:
+        try:
+            deployment = await db.get(Deployment, deployment_id)
+            if deployment is not None:
+                from app.runtime import live
+
+                await live.publish(
+                    user_id=deployment.user_id, app_id=deployment.repository_id,
+                    deployment_id=deployment_id, status=deployment.status.value,
+                    stage=stage, level=level.value,
+                )
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not announce %s for %s", stage, deployment_id, exc_info=True)
 
 
 # --------------------------------------------------------------------------
@@ -268,6 +285,7 @@ async def start(
     deployment.runtime_started_at = datetime.now(timezone.utc)
     deployment.runtime_stopped_at = None
     deployment.error_message = None
+    deployment.runtime_env = environment_state.digest(env)
     await db.commit()
 
     await record(
@@ -279,6 +297,65 @@ async def start(
         actor=actor,
     )
     return deployment
+
+
+_BUILDS_IN_FLIGHT = (
+    DeploymentStatus.QUEUED,
+    DeploymentStatus.BUILDING,
+    DeploymentStatus.PUSHING,
+)
+
+
+async def go_live(
+    db: AsyncSession,
+    deployment: Deployment,
+    repository: Repository,
+    user: User,
+    *,
+    actor: str,
+) -> bool:
+    """
+    Start a deployment whose build just finished, replacing the live one.
+
+    Deploying is the point of a build: a redeploy, or a push, should end with
+    the new version live, not with a button to press. Two exceptions:
+
+      * a newer build of the app has already overtaken this one — it is what
+        was asked for last, so it wins;
+      * the start is refused before anything runs (quota, a block): the build
+        stays usable and is started once the reason is gone.
+
+    A start that fails *after* running something has been recorded and
+    explained by `start`, and the previous version is still serving. Returns
+    whether the deployment is now live.
+    """
+    newer = (
+        await db.execute(
+            select(Deployment.id).where(
+                Deployment.repository_id == repository.id,
+                Deployment.created_at > deployment.created_at,
+                Deployment.status.in_([*_BUILDS_IN_FLIGHT, DeploymentStatus.BUILT]),
+            )
+        )
+    ).first()
+    if newer is not None:
+        await record(
+            db, deployment.id, "start",
+            "Not started: a newer build of this app is on its way.",
+        )
+        return False
+
+    try:
+        await start(db, deployment, repository, user, actor=actor)
+    except AppError as exc:
+        if deployment.status is DeploymentStatus.BUILT:
+            await record(
+                db, deployment.id, "start",
+                f"Built, but not started: {exc.message}",
+                level=EventLevel.WARNING,
+            )
+        return False
+    return True
 
 
 async def _supersede(
@@ -433,6 +510,14 @@ async def _start_compose(
     # Environment variables reach compose through a .env file beside the
     # compose file, which is where Compose itself looks for them.
     _write_compose_env(stack_dir, env)
+    # A stack this platform generated carries the variables in the file
+    # itself; rewrite them so a restart uses today's values, not the build's.
+    try:
+        refreshed = stack.with_environment(compose_file.read_text(encoding="utf-8"), env)
+        if refreshed is not None:
+            compose_file.write_text(refreshed, encoding="utf-8")
+    except OSError:
+        logger.warning("Could not refresh the environment of %s", compose_file)
 
     log_file = _build_log_path(deployment)
     # A stack built in GitHub Actions pulls its images from the student's
@@ -513,9 +598,11 @@ def _write_compose_env(stack_dir, env: dict[str, str]) -> None:
     *and* passes matching values through to services, which is the behaviour a
     student writing a compose file already expects.
     """
-    if not env:
-        return
     try:
+        if not env:
+            # Every variable was removed: the old file must not outlive them.
+            (stack_dir / ".env").unlink(missing_ok=True)
+            return
         lines = [
             f"{key}={value}"
             for key, value in sorted(env.items())

@@ -7,12 +7,13 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { useLive } from "@/lib/live";
 
 import { ActivityList } from "@/components/app/ActivityList";
 import { ChartPanel, Meter, Sparkline, StackedBars, StatTile } from "@/components/charts";
 import { ArrowRight, BoxIcon, ExternalIcon, GlobeIcon, PlusIcon, RocketIcon } from "@/components/Icons";
 import { useSession } from "@/components/Session";
-import { Alert, Badge, Button, Dot, EmptyState, Eyebrow, SectionTitle, Skeleton, relativeTime } from "@/components/ui";
+import { Alert, Badge, Button, Dot, EmptyState, Eyebrow, Panel, SectionTitle, Skeleton, relativeTime } from "@/components/ui";
 import { apiFetch } from "@/lib/api";
 import { appKind, appState, appsPulse, listApps, myActivity, type Activity, type App, type AppPulse } from "@/lib/apps";
 import { isRunning, type Deployment } from "@/lib/deployments";
@@ -39,13 +40,17 @@ export default function DashboardPage() {
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [activity, setActivity] = useState<Activity[] | null>(null);
 
+  // Re-read the moment the server reports a change (lib/live.ts).
+  const [liveTick, setLiveTick] = useState(0);
+  useLive(() => setLiveTick((n) => n + 1));
+
   useEffect(() => {
     let active = true;
     const load = () => {
       listApps().then((a) => active && setApps(a)).catch(() => active && setApps([]));
       appsPulse().then((p) => active && setPulse(p)).catch(() => undefined);
       apiFetch<Deployment[]>("/deployments?limit=200").then((d) => active && setDeployments(d)).catch(() => undefined);
-      myActivity(12).then((a) => active && setActivity(a)).catch(() => active && setActivity([]));
+      myActivity(40).then((a) => active && setActivity(a)).catch(() => active && setActivity([]));
     };
     load();
     const t = setInterval(load, 20_000);
@@ -53,7 +58,7 @@ export default function DashboardPage() {
       active = false;
       clearInterval(t);
     };
-  }, []);
+  }, [liveTick]);
 
   const stats = useMemo(() => {
     const days = lastDays(DAYS);
@@ -158,23 +163,23 @@ export default function DashboardPage() {
         )}
       </section>
 
-      <div className="grid gap-6 lg:grid-cols-[1.25fr_1fr]">
+      <div className="grid gap-4 lg:h-[24rem] lg:grid-cols-[1.25fr_1fr]">
         <ChartPanel title="Builds · last 14 days" value={stats.windowTotal}
-          caption={stats.windowRate == null ? "none in this window" : `${share(stats.windowRate)} succeeded`}>
-          <StackedBars days={stats.days} height={180}
+          caption={stats.windowRate == null ? "none in this window" : `${share(stats.windowRate)} succeeded`}
+          footer={<><span>Median build {seconds(stats.median)}</span><span>{stats.rate == null ? "" : `${share(stats.rate)} succeed, all time`}</span></>}>
+          <StackedBars days={stats.days}
             parts={[
               { key: "ok", label: "Succeeded", color: "var(--ok)", values: stats.ok },
               { key: "bad", label: "Failed", color: "var(--danger)", values: stats.bad },
             ]} />
         </ChartPanel>
-        <section>
-          <SectionTitle action={<Link href="/activity" className="text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text)]">All →</Link>}>
-            Recent activity
-          </SectionTitle>
-          {activity === null ? <Skeleton className="h-60" /> : (
-            <ActivityList items={activity.slice(0, 6)} hrefFor={(a) => `/apps/${a.app_id}`} />
+        <Panel title="Recent activity" hint="Across every app you own."
+          action={<Link href="/activity" className="font-medium text-[var(--text-muted)] hover:text-[var(--text)]">All →</Link>}
+          flush>
+          {activity === null ? <div className="p-5"><Skeleton className="h-40" /></div> : (
+            <ActivityList items={activity} hrefFor={(a) => `/apps/${a.app_id}`} flush />
           )}
-        </section>
+        </Panel>
       </div>
     </div>
   );

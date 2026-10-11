@@ -5,8 +5,26 @@
  * the JWT (added in Task 2) is attached consistently.
  */
 
-export const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const CONFIGURED_API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
+/**
+ * Where the API is, from this browser's point of view.
+ *
+ * On the machine running DeployForge that is the configured address. Opened
+ * through a public tunnel (an ngrok domain, for a demo), `localhost:8000`
+ * would mean the *viewer's* machine — so the console goes through its own
+ * origin instead, and Next.js forwards `/backend/*` to the API (see
+ * next.config.ts). One tunnel then serves the console, the API, GitHub's
+ * webhooks and the callbacks from GitHub Actions.
+ */
+export function apiBase(): string {
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname;
+    const local = host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host.endsWith(".localhost");
+    if (!local && /\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(CONFIGURED_API_URL)) return "/backend";
+  }
+  return CONFIGURED_API_URL;
+}
 
 export class ApiError extends Error {
   constructor(
@@ -18,18 +36,24 @@ export class ApiError extends Error {
   }
 }
 
-/** Read the stored JWT directly to avoid a circular import with lib/auth. */
+/**
+ * The stored JWT (read directly to avoid a circular import with lib/auth),
+ * and — through a free ngrok tunnel — the header that stops ngrok answering
+ * an API call with its "you are about to visit" page.
+ */
 function authHeader(): Record<string, string> {
   if (typeof window === "undefined") return {};
   const token = window.localStorage.getItem("deployforge_token");
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  if (apiBase() === "/backend") headers["ngrok-skip-browser-warning"] = "1";
+  return headers;
 }
 
 export async function apiFetch<T>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, {
+  const res = await fetch(`${apiBase()}${path}`, {
     ...options,
     headers: {
       "Content-Type": "application/json",
@@ -81,12 +105,14 @@ export function apiStream(
   path: string,
   onEvent: (e: StreamEvent) => void,
   onError?: (err: Error) => void,
+  /** The server ended the stream (not an abort from this side). */
+  onEnd?: () => void,
 ): () => void {
   const controller = new AbortController();
 
   (async () => {
     try {
-      const res = await fetch(`${API_URL}${path}`, {
+      const res = await fetch(`${apiBase()}${path}`, {
         headers: { Accept: "text/event-stream", ...authHeader() },
         signal: controller.signal,
       });
@@ -126,6 +152,7 @@ export function apiStream(
           }
         }
       }
+      if (!controller.signal.aborted) onEnd?.();
     } catch (err) {
       if (controller.signal.aborted) return;
       onError?.(err instanceof Error ? err : new Error(String(err)));

@@ -72,3 +72,12 @@ export function dateTime(ts: number | string | null | undefined): string {
 export function shortSha(sha: string | null | undefined): string {
   return sha ? sha.slice(0, 7) : "—";
 }
+
+/** Who did something, as a person would say it. */
+export function actorName(actor: string | null | undefined): string | null {
+  if (!actor || actor === "owner") return null;
+  if (actor === "admin") return "an administrator";
+  if (actor === "platform") return "the platform, automatically";
+  if (actor === "github") return "a push to GitHub";
+  return actor;
+}

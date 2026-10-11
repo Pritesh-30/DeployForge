@@ -140,7 +140,8 @@ const post = <T,>(path: string, body?: unknown) =>
 export const adminStartApp = (id: string) => post<AppDetail>(`/admin/apps/${id}/start`);
 export const adminStopApp = (id: string) => post<AppDetail>(`/admin/apps/${id}/stop`);
 export const adminRestartApp = (id: string) => post<AppDetail>(`/admin/apps/${id}/restart`);
-export const adminRedeployApp = (id: string) => post<{ deployment_id: string }>(`/admin/apps/${id}/redeploy`);
+export const adminRedeployApp = (id: string, fresh = false) =>
+  post<{ deployment_id: string }>(`/admin/apps/${id}/redeploy${fresh ? "?fresh=true" : ""}`);
 export const adminSuspendApp = (id: string, reason?: string) =>
   post<AppDetail>(`/admin/apps/${id}/suspend`, { reason: reason || null });
 export const adminResumeApp = (id: string) => post<AppDetail>(`/admin/apps/${id}/resume`);
@@ -178,10 +179,19 @@ export type QueueView = {
   delayed: QueueJob[];
   recent: QueueJob[];
   stats: Record<string, number>;
+} & Concurrency;
+
+/** How many builds run at once, and what the machine suggests. */
+export type Concurrency = {
   concurrency: number;
+  concurrency_default: number;
+  concurrency_max: number;
+  cpus: number;
 };
 
 export const getQueue = () => apiFetch<QueueView>("/admin/queue");
+export const setConcurrency = (value: number | null) =>
+  apiFetch<Concurrency>("/admin/queue/concurrency", { method: "PUT", body: JSON.stringify({ value }) });
 export const cancelJob = (id: string) => post<{ state: string }>(`/admin/queue/${encodeURIComponent(id)}/cancel`);
 
 export type HostMetrics = {

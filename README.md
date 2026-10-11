@@ -71,6 +71,40 @@ Three things follow, and all three are what a student would assume anyway:
 - **A failed redeploy does not take an app down.** While something is running,
   that is the app's state; the failure is in the history, where its log is.
 
+- **The same build is never made twice.** Every successful build records a
+  fingerprint of what went into it (commit, directory, build method, and for
+  buildpacks the build-time environment and builder). Redeploying a commit
+  that was already built with the same settings reuses that image and is
+  ready in seconds; the deployment is marked *instant*. **Redeploy ▾ → Rebuild
+  from scratch** builds anyway, for a `latest` base image or a package that
+  moved. See `backend/app/builder/reuse.py`.
+- **A finished build goes live by itself**, whether it was built on this
+  server or in GitHub Actions — unless a newer build has overtaken it.
+- **A release that crashes soon after going live is rolled back.** For
+  `AUTO_ROLLBACK_WINDOW_SECONDS` (default 300) after a version goes live, the
+  platform checks on its container every 10 seconds. If it stopped or is
+  crash-looping, the previous version's image is started again and the
+  crashed one is marked failed with its last output. A version started by a
+  rollback is never itself rolled back. See `backend/app/runtime/guardian.py`.
+- **Saving environment variables puts them into effect.** Each start records
+  a hash of every value (never the value). After a save, the Environment tab
+  asks what the change needs: nothing (the app is not running), a restart
+  (done automatically, in seconds), or a redeploy (a `NEXT_PUBLIC_*`-style
+  value was baked into a buildpack build — offered with one click). The tab
+  always shows whether the running app has the saved values.
+- **GitHub Actions builds show their steps.** The deployment page splits the
+  build stage of the progress bar into the workflow run's own steps, and the
+  app's banner names the step in progress.
+- **A restart never loses a build.** Builds live on the Redis queue, not in a
+  browser tab or a request: refreshing the page, closing it, or restarting the
+  backend does not cancel one. A build whose server stopped mid-way is put
+  back at the front of its lane within about 15 seconds (each worker keeps a
+  short-lived "alive" key), its row says *queued* with an event explaining
+  why, and it starts again by itself. Builds on GitHub Actions run on GitHub
+  and report back whenever they finish. Every page re-reads state from the
+  API on load, and logs replay from the start, so a reload shows exactly
+  where things are.
+
 Deleting an app removes its containers, its history and the connection, so the
 repository can be connected again. Deleting one deployment removes only that
 build from the history.
@@ -143,7 +177,23 @@ moment later.
 
 ## 1. Infrastructure
 
-Five containers. Run these once; they restart with Docker afterwards.
+**On Windows, one command does sections 1, 3's migrations and 9:**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 up        # network, Postgres, Redis, registry, Traefik, migrations
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 backend   # frees port 8000 from a stale uvicorn, then runs it
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 frontend
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 status
+```
+
+`up` is safe to run any number of times: containers that exist are started,
+not recreated (no more `container name ... is already in use`), and Traefik is
+recreated only when its provider token differs from `TRAEFIK_PROVIDER_TOKEN`
+in `backend/.env` — the cause of `403 Forbidden` on
+`/internal/traefik/config`. `backend` stops only leftover `uvicorn app.main`
+processes holding port 8000, which Windows reports as `WinError 10013`.
+
+The manual steps follow. Five containers. Run these once; they restart with Docker afterwards.
 
 ```bash
 docker network create deployforge_edge
@@ -429,8 +479,47 @@ workflow file), `read:packages` (to pull their images) and `delete:packages`
 before builds moved to Actions sees a **Reconnect GitHub** button under
 **Deploy new**.
 
-On a laptop the default stays `BUILD_BACKEND=local`: GitHub cannot call back
-to `localhost`, so builds run on the machine as before.
+On a laptop the default stays `BUILD_BACKEND=local`, and GitHub cannot reach
+`localhost` — so neither GitHub Actions builds nor push deploys work until the
+laptop has a public address. **One** ngrok tunnel (a free static domain) is
+enough, because the console forwards `/backend/*` to the API
+(`frontend/next.config.ts`):
+
+| Through `https://<NGROK_DOMAIN>` | Goes to |
+|---|---|
+| `/` | the console (port 3000), for showing the demo on any device |
+| `/backend/webhooks/github?app=<id>` | GitHub push webhooks |
+| `/backend/ci/runs…` | GitHub Actions asking what to build and reporting back |
+
+```powershell
+# backend/.env: NGROK_DOMAIN=<your static domain>   (once)
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 tunnel actions   # or "local"; keep it open
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 backend          # restart the API
+```
+
+`tunnel` writes `PUBLIC_API_URL=https://<domain>/backend`, generates
+`GITHUB_WEBHOOK_SECRET` the first time, optionally sets `BUILD_BACKEND`, and
+runs `ngrok http 3000 --url=<domain>`. When the API starts it gives every app
+with push deploys on a GitHub webhook pointing at that address (re-pointing
+existing ones, so a changed address never leaves dead hooks), signed with the
+secret. `POST /admin/webhooks/sync` does the same on demand.
+
+A push then deploys, whichever backend builds:
+
+- **local** — the webhook queues a build on the laptop; it goes live when done.
+- **actions** — the first push (or Redeploy) commits the DeployForge workflow
+  to the repository and runs it; after that the workflow itself runs on each
+  push and the webhook stands aside, so nothing is built twice.
+
+A push to another branch, to another app's folder in a monorepo, with push
+deploys turned off, or that only changes the workflow file does not deploy —
+the reason is in the webhook's **Recent deliveries** on GitHub.
+
+While the tunnel is open the API is reachable from the internet. Every route
+still needs a login, webhook deliveries need the HMAC signature, the router's
+endpoint needs its token, and build callbacks need a GitHub-signed token for
+the app's own repository. GitHub sign-in still returns to the OAuth app's
+callback URL (`localhost:3000`), so sign in on the laptop.
 
 ---
 
@@ -504,6 +593,10 @@ deploy flow at all:
   has a page with their apps, usage, activity and every admin action on them.
 - **Build queue** — the fair scheduler made visible: build slots, each
   student's lane, the exact order builds will run in, retries backing off.
+  **Builds at once** is adjustable here (− / +, up to `BUILD_CONCURRENCY_MAX`,
+  default 8). It takes effect within seconds without a restart and survives
+  one; lowering it lets running builds finish. `BUILD_CONCURRENCY` is only
+  the starting value. About one build per two CPU cores keeps each build fast.
 - **Infrastructure** — service checks, load over time, every container with
   live usage and the app and student it belongs to, Docker's disk use.
 - **Audit log** — every administrator action, who took it and on whose app.

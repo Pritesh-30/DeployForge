@@ -158,3 +158,23 @@ async def test_only_the_tagged_version_is_deleted(our_registry, monkeypatch, tmp
         ("GET", "/user/packages/container/todo%2Fapp/versions?per_page=100"),
         ("DELETE", "/user/packages/container/todo%2Fapp/versions/2"),
     ]
+
+
+def test_a_throwaway_docker_config_still_finds_cli_plugins(tmp_path, monkeypatch):
+    """
+    Docker Desktop installs `docker compose` under the user's config directory.
+    A login-only config would hide it and `docker compose --file` would fail
+    with "unknown flag: --file" — on a laptop, never on a Linux server.
+    """
+    import json
+
+    from app.runtime.registry import client_config
+
+    home = tmp_path / ".docker"
+    (home / "cli-plugins").mkdir(parents=True)
+    (home / "config.json").write_text(json.dumps({"cliPluginsExtraDirs": ["C:/Program Files/Docker/cli-plugins"]}))
+    monkeypatch.setenv("DOCKER_CONFIG", str(home))
+
+    config = client_config({"ghcr.io": {"auth": "x"}})
+    assert config["auths"] == {"ghcr.io": {"auth": "x"}}
+    assert config["cliPluginsExtraDirs"] == ["C:/Program Files/Docker/cli-plugins", str(home / "cli-plugins")]

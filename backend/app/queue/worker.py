@@ -1,7 +1,11 @@
 """
 Workers that run the queue's jobs.
 
-A worker has a fixed number of slots. Each slot takes a job, holds a lease on
+A worker opens up to `build_concurrency_max` slots, and how many of them may
+take work is read from the queue on every pass — so an administrator raising
+or lowering "builds at once" takes effect within seconds, without a restart.
+Lowering it never stops a running build: the slots above the new limit finish
+what they hold and then stay idle. Each slot takes a job, holds a lease on
 it while it runs and renews the lease on a heartbeat, then reports how it
 ended. If the process dies, the heartbeat stops, the lease lapses, and the
 maintenance loop of any surviving worker — or this one, once it is back —
@@ -27,6 +31,7 @@ import asyncio
 import logging
 import os
 import socket
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
@@ -41,6 +46,10 @@ logger = logging.getLogger(__name__)
 # second of latency before one starts is invisible.
 _IDLE_SECONDS = 1.0
 _MAINTENANCE_SECONDS = 5.0
+_LIMIT_TTL_SECONDS = 2.0
+# A worker refreshes its "alive" key every maintenance pass; three missed
+# passes and its leases are treated as orphaned.
+_ALIVE_TTL_SECONDS = int(_MAINTENANCE_SECONDS * 3)
 
 
 @dataclass
@@ -67,12 +76,16 @@ Handler = Callable[[Job, JobContext], Awaitable[None]]
 # Called when a job is given up on without its handler finishing it — the
 # worker died too many times — so the owner can be told.
 DeadHandler = Callable[[Job, str], Awaitable[None]]
+# Called when a job whose worker died is put back in line, so what the owner
+# sees can say "waiting to resume" instead of "building" with nothing behind it.
+ReclaimedHandler = Callable[[Job], Awaitable[None]]
 
 
 @dataclass
 class JobType:
     run: Handler
     on_dead: DeadHandler | None = None
+    on_reclaimed: ReclaimedHandler | None = None
 
 
 class Worker:
@@ -87,17 +100,41 @@ class Worker:
         name: str | None = None,
     ) -> None:
         self.handlers = handlers
-        self.concurrency = max(1, concurrency or settings.build_concurrency)
+        # A fixed number (tests, or a deliberately pinned worker) or, by
+        # default, whatever limit the queue currently holds.
+        self.fixed = max(1, concurrency) if concurrency else None
+        self.slots = self.fixed or max(1, settings.build_concurrency_max)
         self.queue = queue or default_queue
         self.name = name or f"{socket.gethostname()}:{os.getpid()}"
         self.active: dict[int, str] = {}
+        self._limit = (0.0, self.fixed or settings.build_concurrency)
+
+    async def limit(self) -> int:
+        """The current limit, read at most every couple of seconds."""
+        if self.fixed:
+            return self.fixed
+        read_at, value = self._limit
+        if time.monotonic() - read_at > _LIMIT_TTL_SECONDS:
+            try:
+                value = await self.queue.concurrency()
+            except Exception:  # noqa: BLE001 — keep the last known limit
+                logger.debug("Could not read the concurrency limit", exc_info=True)
+            self._limit = (time.monotonic(), value)
+        return value
 
     async def run(self, stop: asyncio.Event) -> None:
         """Run until `stop` is set. Never raises because of one bad job."""
-        logger.info("Worker %s starting with %d slot(s)", self.name, self.concurrency)
+        logger.info("Worker %s starting: %d build(s) at once, up to %d",
+                    self.name, await self.limit(), self.slots)
+        # Alive before the first job is taken, so no other worker mistakes
+        # this one's fresh leases for orphans.
+        try:
+            await self.queue.mark_alive(self.name, ttl_seconds=_ALIVE_TTL_SECONDS)
+        except Exception:  # noqa: BLE001 — Redis down: the slots will wait too
+            logger.debug("Could not mark the worker alive", exc_info=True)
         tasks = [
             asyncio.create_task(self._slot(i, stop), name=f"queue-slot-{i}")
-            for i in range(self.concurrency)
+            for i in range(self.slots)
         ]
         tasks.append(asyncio.create_task(self._maintenance(stop), name="queue-maintenance"))
         try:
@@ -111,6 +148,10 @@ class Worker:
     async def _slot(self, index: int, stop: asyncio.Event) -> None:
         slot_name = f"{self.name}/{index}"
         while not stop.is_set():
+            if index >= await self.limit():
+                # Above the limit: stay idle until an administrator raises it.
+                await _sleep_or_stop(stop, _IDLE_SECONDS)
+                continue
             try:
                 job = await self.queue.dequeue(slot_name)
             except Exception:  # noqa: BLE001 — Redis down: wait and try again
@@ -184,12 +225,35 @@ class Worker:
 
     async def _maintenance(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
-            try:
-                for job_id in await self.queue.maintain():
-                    await self._dead(job_id)
-            except Exception:  # noqa: BLE001
-                logger.debug("Queue maintenance failed", exc_info=True)
+            await self.maintain_once()
             await _sleep_or_stop(stop, _MAINTENANCE_SECONDS)
+
+    async def maintain_once(self) -> None:
+        """One pass: stay alive, reclaim orphans, promote retries."""
+        try:
+            await self.queue.mark_alive(self.name, ttl_seconds=_ALIVE_TTL_SECONDS)
+            orphans = await self.queue.expire_orphans()
+            if orphans:
+                logger.info("Reclaiming %d build(s) whose worker stopped: %s", len(orphans), orphans)
+            dead, reclaimed = await self.queue.maintain_detailed()
+        except Exception:  # noqa: BLE001
+            logger.debug("Queue maintenance failed", exc_info=True)
+            return
+        for job_id in dead:
+            await self._dead(job_id)
+        for job_id in reclaimed:
+            await self._reclaimed(job_id)
+
+    async def _reclaimed(self, job_id: str) -> None:
+        job = await self.queue.get(job_id)
+        if job is None:
+            return
+        job_type = self.handlers.get(job.kind)
+        if job_type and job_type.on_reclaimed:
+            try:
+                await job_type.on_reclaimed(job)
+            except Exception:  # noqa: BLE001
+                logger.exception("on_reclaimed handler failed for %s", job_id)
 
     async def _dead(self, job_id: str) -> None:
         job = await self.queue.get(job_id)

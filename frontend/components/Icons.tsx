@@ -217,6 +217,14 @@ export function ChevronRight({ className }: IconProps) {
   );
 }
 
+export function ChevronDown({ className }: IconProps) {
+  return (
+    <Svg className={className}>
+      <path d="m6 9 6 6 6-6" />
+    </Svg>
+  );
+}
+
 export function ArrowLeft({ className }: IconProps) {
   return (
     <Svg className={className}>

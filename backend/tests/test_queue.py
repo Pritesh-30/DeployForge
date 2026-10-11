@@ -333,3 +333,89 @@ async def test_a_running_worker_drains_the_queue_and_stops_cleanly():
 
     for i in range(3):
         assert (await q.get(f"j{i}")).state == "done"
+
+
+# --- Builds at once ---------------------------------------------------------
+
+async def test_the_limit_defaults_to_the_setting_and_is_clamped():
+    from app.config import settings
+
+    q = JobQueue()
+    assert await q.concurrency() == settings.build_concurrency
+    assert await q.set_concurrency(5) == 5
+    assert await q.set_concurrency(10_000) == settings.build_concurrency_max
+    assert await q.set_concurrency(0) == 1
+    assert await q.set_concurrency(None) == settings.build_concurrency
+
+
+async def test_raising_the_limit_lets_more_builds_run_without_a_restart(monkeypatch):
+    """Slots above the limit idle; raising it wakes them within seconds."""
+    from app.queue import worker as worker_module
+
+    monkeypatch.setattr(worker_module, "_LIMIT_TTL_SECONDS", 0.0)
+    monkeypatch.setattr(worker_module, "_IDLE_SECONDS", 0.05)
+    q = JobQueue()
+    await q.set_concurrency(1)
+    release = asyncio.Event()
+    running = 0
+    peak = 0
+
+    async def run(job, ctx):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await release.wait()
+        running -= 1
+
+    worker = Worker({"build": JobType(run=run)}, queue=q)
+    for i in range(3):
+        await q.enqueue(kind="build", tenant=f"t{i}", payload={}, job_id=f"j{i}")
+
+    stop = asyncio.Event()
+    runner = asyncio.create_task(worker.run(stop))
+    await asyncio.sleep(0.4)
+    assert peak == 1
+
+    await q.set_concurrency(3)
+    await asyncio.sleep(0.4)
+    assert peak == 3
+
+    release.set()
+    await asyncio.sleep(0.2)
+    stop.set()
+    await asyncio.wait_for(runner, timeout=10)
+
+
+# --- A worker that is gone --------------------------------------------------
+
+async def test_a_dead_workers_build_is_reclaimed_without_waiting_for_its_lease():
+    """
+    The server restarted mid-build. Its lease has most of a minute left, but
+    its worker's alive key is gone, so the next pass puts the build back.
+    """
+    q = JobQueue()
+    await q.enqueue(kind="build", tenant="t", payload={}, job_id="j")
+    await q.dequeue("old-host:1/0", lease_seconds=300)  # never marked alive: it is gone
+
+    reclaimed = []
+
+    async def on_reclaimed(job):
+        reclaimed.append(job.id)
+
+    worker = Worker({"build": JobType(run=lambda job, ctx: None, on_reclaimed=on_reclaimed)}, queue=q, name="new-host:2")
+    await worker.maintain_once()
+
+    assert reclaimed == ["j"]
+    assert (await q.get("j")).state == "pending"
+
+
+async def test_a_live_workers_build_is_left_alone():
+    q = JobQueue()
+    await q.enqueue(kind="build", tenant="t", payload={}, job_id="j")
+    await q.mark_alive("busy-host:1", ttl_seconds=60)
+    await q.dequeue("busy-host:1/0", lease_seconds=300)
+
+    worker = Worker({"build": JobType(run=lambda job, ctx: None)}, queue=q, name="other:2")
+    await worker.maintain_once()
+
+    assert (await q.get("j")).state == "running"

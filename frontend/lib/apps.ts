@@ -182,8 +182,9 @@ export const deleteApp = (id: string) => apiFetch<null>(`/apps/${id}`, { method:
 export const updateApp = (id: string, changes: { branch?: string; auto_deploy?: boolean }) =>
   apiFetch<AppDetail>(`/apps/${id}`, { method: "PATCH", body: JSON.stringify(changes) });
 
-export const redeployApp = (id: string) =>
-  apiFetch<{ deployment_id: string }>(`/apps/${id}/redeploy`, { method: "POST" });
+/** `fresh` builds even when this commit was already built with the same settings. */
+export const redeployApp = (id: string, fresh = false) =>
+  apiFetch<{ deployment_id: string }>(`/apps/${id}/redeploy${fresh ? "?fresh=true" : ""}`, { method: "POST" });
 
 export const promoteDeployment = (appId: string, deploymentId: string) =>
   apiFetch<Deployment>(`/apps/${appId}/deployments/${deploymentId}/promote`, { method: "POST" });
@@ -240,6 +241,16 @@ export function appState(app: App): { label: string; tone: StateTone; live: bool
   }
 }
 
+/**
+ * The deployment being built or started right now, if any — which is not
+ * always `current`: while a new version builds, `current` is still the one
+ * serving traffic.
+ */
+export function inflightDeployment(app: AppDetail): Deployment | null {
+  const busy = (d: Deployment) => ["queued", "building", "pushing", "starting"].includes(d.status);
+  return app.deployments.find(busy) ?? (app.current && busy(app.current) ? app.current : null);
+}
+
 export function appIsBusy(app: App): boolean {
   return !!app.current && ["queued", "building", "pushing", "starting"].includes(app.current.status);
 }
@@ -261,3 +272,25 @@ export function appKind(app: Pick<App, "detected_framework" | "detected_type" | 
   }
   return app.detected_type === "docker" ? "Docker" : "—";
 }
+
+/* --- Environment in effect ---------------------------------------------- */
+
+/**
+ * Whether the running app has the variables saved now:
+ *   not_running — nothing runs; the next start uses them
+ *   in_effect   — the running app has exactly these
+ *   restart     — a restart (seconds) puts them in effect
+ *   rebuild     — a value is baked into the build; only a redeploy carries it
+ */
+export type EnvState = {
+  state: "not_running" | "in_effect" | "restart" | "rebuild";
+  changed: string[];
+  build_time: string[];
+  deployment_id: string | null;
+};
+
+export const environmentStatus = (id: string) => apiFetch<EnvState>(`/apps/${id}/environment/status`);
+export const applyEnvironment = (id: string) =>
+  apiFetch<EnvState & { action: "none" | "restarted" | "redeploying"; build_deployment_id?: string }>(
+    `/apps/${id}/environment/apply`, { method: "POST" },
+  );

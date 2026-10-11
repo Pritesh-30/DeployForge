@@ -25,10 +25,14 @@ import { Toaster } from "@/components/Feedback";
 import { Skeleton } from "@/components/ui";
 import { apiFetch } from "@/lib/api";
 import { getCurrentUser, homeFor, type User } from "@/lib/auth";
+import { connectLive } from "@/lib/live";
 
 export type Meta = {
   version: string;
   build_backend: "local" | "actions" | string;
+  /** A push to GitHub deploys: via webhooks, or the Actions workflow. */
+  push_deploys?: boolean;
+  webhooks?: boolean;
   app_domain: string;
   https: boolean;
   ai_diagnosis: boolean;
@@ -84,6 +88,13 @@ export function ConsoleSession({ children }: { children: ReactNode }) {
       active = false;
     };
   }, [router]);
+
+  // One live-update stream for the whole session (lib/live.ts).
+  const signedIn = !!user;
+  useEffect(() => {
+    if (!signedIn) return;
+    return connectLive();
+  }, [signedIn]);
 
   const isAdminPath = pathname.startsWith("/admin");
   const misplaced = !!user && (user.role === "admin") !== isAdminPath;

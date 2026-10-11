@@ -26,6 +26,19 @@ from app.db import get_db
 from app.main import app
 
 
+@pytest.fixture(autouse=True)
+def laptop_defaults(monkeypatch):
+    """
+    The suite assumes a plain laptop install, whatever backend/.env says:
+    a developer demoing through a tunnel (BUILD_BACKEND=actions, a webhook
+    secret, a public address) must not change what the tests exercise.
+    Tests that need those settings set them themselves.
+    """
+    monkeypatch.setattr(settings, "build_backend", "local")
+    monkeypatch.setattr(settings, "github_webhook_secret", "")
+    monkeypatch.setattr(settings, "public_api_url", "http://localhost:8000")
+
+
 @pytest_asyncio.fixture
 async def db_session() -> AsyncGenerator[AsyncSession, None]:
     """

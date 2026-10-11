@@ -12,6 +12,7 @@ import Link from "next/link";
 
 import { cx, relativeTime } from "@/components/ui";
 import type { Activity } from "@/lib/apps";
+import { actorName } from "@/lib/format";
 
 const LEVEL_DOT: Record<Activity["level"], string> = {
   info: "bg-[var(--text-dim)]",
@@ -35,14 +36,23 @@ export function ActivityList({
   showApp = true,
   hrefFor,
   deploymentHref,
+  flush = false,
 }: {
   items: Activity[];
   showApp?: boolean;
   hrefFor?: (a: Activity) => string;
   deploymentHref?: (id: string) => string;
+  /** Inside a Panel: no cards of its own, day headings stick while scrolling. */
+  flush?: boolean;
 }) {
   if (items.length === 0) {
-    return <p className="rounded-[var(--r)] border border-dashed border-[var(--hairline-strong)] px-4 py-10 text-center text-sm text-[var(--text-dim)]">Nothing has happened yet.</p>;
+    return flush ? (
+      <div className="flex h-full min-h-[8rem] items-center justify-center px-6 text-center text-sm text-[var(--text-dim)]">
+        Nothing has happened yet. Builds, starts and anything an administrator does will appear here.
+      </div>
+    ) : (
+      <p className="rounded-[var(--r)] border border-dashed border-[var(--hairline-strong)] px-4 py-10 text-center text-sm text-[var(--text-dim)]">Nothing has happened yet.</p>
+    );
   }
 
   const groups: { day: string; items: Activity[] }[] = [];
@@ -54,11 +64,14 @@ export function ActivityList({
   }
 
   return (
-    <div className="space-y-5">
+    <div className={flush ? undefined : "space-y-5"}>
       {groups.map((group) => (
         <div key={group.day}>
-          <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--text-dim)]">{group.day}</p>
-          <ol className="plate relative divide-y divide-[var(--hairline)] overflow-hidden">
+          <p className={cx(
+            "text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--text-dim)]",
+            flush ? "sticky top-0 z-10 border-b border-[var(--hairline)] bg-[var(--surface)] px-4 py-2" : "mb-2",
+          )}>{group.day}</p>
+          <ol className={cx("relative divide-y divide-[var(--hairline)]", !flush && "plate overflow-hidden")}>
             {group.items.map((a) => (
               <li key={a.id} className="flex gap-3 px-4 py-3">
                 <span className={cx("mt-1.5 h-2 w-2 shrink-0 rounded-full", LEVEL_DOT[a.level])} />
@@ -76,7 +89,7 @@ export function ActivityList({
                       ) : <span className="font-medium text-[var(--text-muted)]">{a.app_label}</span>
                     )}
                     <span className="capitalize">{a.stage}</span>
-                    {a.actor && a.actor !== "owner" && <span>· by {a.actor === "admin" ? "an administrator" : a.actor}</span>}
+                    {actorName(a.actor) && <span>· by {actorName(a.actor)}</span>}
                     <span>· {relativeTime(a.created_at)}</span>
                     {deploymentHref && (
                       <Link href={deploymentHref(a.deployment_id)} className="hover:text-[var(--text-muted)]">· deployment</Link>

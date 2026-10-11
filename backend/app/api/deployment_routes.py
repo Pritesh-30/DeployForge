@@ -57,6 +57,7 @@ def deployment_out(
         has_logs=bool(deployment.logs_ref),
         ci_run_url=deployment.ci_run_url,
         ci_trigger=deployment.ci_trigger,
+        reused_from_id=deployment.reused_from_id,
         url=deployment.url,
         subdomain=deployment.subdomain,
         app_port=deployment.app_port,
@@ -399,6 +400,36 @@ async def events_of(db: AsyncSession, deployment_id: uuid.UUID) -> list[Deployme
         )
     ).scalars().all()
     return [DeploymentEventOut.model_validate(e, from_attributes=True) for e in rows]
+
+
+@router.get("/{deployment_id}/ci-progress")
+async def get_ci_progress(
+    deployment_id: uuid.UUID, current_user: CurrentUser, db: DbSession
+) -> dict:
+    """Where a GitHub Actions build has got to, step by step."""
+    deployment, repository = await _owned_deployment(db, deployment_id, current_user.id)
+    return await ci_progress_for(db, deployment, repository)
+
+
+async def ci_progress_for(db: AsyncSession, deployment: Deployment, repository: Repository) -> dict:
+    """
+    The workflow run's steps, or an empty answer while there is no run yet
+    (GitHub has not picked the workflow up) or the build was not on Actions.
+    A GitHub error is reported in the answer rather than raised: progress is
+    a nicety, and the page must not break because GitHub is slow.
+    """
+    from app.ci.progress import run_progress
+    from app.github.token import get_access_token
+
+    empty = {"status": None, "conclusion": None, "html_url": deployment.ci_run_url,
+             "steps": [], "completed": 0, "total": 0, "current": None}
+    if not deployment.ci_run_id:
+        return empty
+    try:
+        token = await get_access_token(db, repository.user_id)
+        return await run_progress(token, repository.full_name, deployment.ci_run_id)
+    except Exception as exc:  # noqa: BLE001 — see docstring
+        return {**empty, "error": str(getattr(exc, "message", exc))}
 
 
 @router.get("/{deployment_id}/events", response_model=list[DeploymentEventOut])

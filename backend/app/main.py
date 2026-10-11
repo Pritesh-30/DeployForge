@@ -23,6 +23,8 @@ from app.api import (
     app_routes,
     auth_routes,
     ci_routes,
+    live_routes,
+    webhook_routes,
     deployment_routes,
     environment_routes,
     github_routes,
@@ -104,6 +106,15 @@ async def lifespan(_app: FastAPI):
         background.append(asyncio.create_task(Worker(HANDLERS).run(stop), name="build-queue"))
     if settings.metrics_enabled:
         background.append(asyncio.create_task(metrics_collector.run(stop), name="metrics"))
+    if settings.auto_rollback_window_seconds > 0:
+        from app.runtime import guardian
+
+        background.append(asyncio.create_task(guardian.run(stop), name="rollback-guardian"))
+    # Point every app's webhook at this server's current address (a laptop's
+    # tunnel address can change between runs).
+    from app.services.webhook_sync import sync_all
+
+    background.append(asyncio.create_task(sync_all(), name="webhook-sync"))
 
     yield
 
@@ -150,6 +161,8 @@ app.include_router(admin_routes.router)
 app.include_router(admin_ops_routes.router)
 app.include_router(internal_routes.router)
 app.include_router(ci_routes.router)
+app.include_router(webhook_routes.router)
+app.include_router(live_routes.router)
 
 
 @app.get("/health", tags=["health"])
@@ -184,6 +197,19 @@ async def health() -> dict:
     }
 
 
+def _webhooks_enabled() -> bool:
+    from app.github import webhooks
+
+    return webhooks.enabled()
+
+
+def _push_deploys() -> bool:
+    from app.github import webhooks
+
+    public = settings.public_api_url.strip().lower().startswith("https://")
+    return webhooks.enabled() or (settings.builds_on_actions and public)
+
+
 @app.get("/meta", tags=["health"])
 async def meta() -> dict:
     """What this installation can do, so the console shows only what works."""
@@ -192,6 +218,10 @@ async def meta() -> dict:
     return {
         "version": app.version,
         "build_backend": settings.build_backend,
+        # Whether a push to GitHub deploys: through the workflow on the Actions
+        # backend (GitHub must reach this server), or through a webhook.
+        "push_deploys": _push_deploys(),
+        "webhooks": _webhooks_enabled(),
         "app_domain": settings.app_domain,
         "https": settings.app_scheme == "https",
         "ai_diagnosis": ai_diagnosis.available(),

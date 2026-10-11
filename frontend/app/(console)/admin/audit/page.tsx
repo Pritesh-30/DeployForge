@@ -28,14 +28,14 @@ const TONE: Record<string, "danger" | "warn" | "ok" | "info" | "neutral"> = {
   "app.suspend": "danger", "app.delete": "danger", "deployment.delete": "danger", "user.disable": "danger",
   "user.block_deploy": "warn", "app.stop": "warn", "queue.cancel": "warn",
   "app.resume": "ok", "app.start": "ok", "user.enable": "ok", "user.allow_deploy": "ok",
-  "app.redeploy": "info", "app.restart": "info", "app.rollback": "info", "user.quota": "info", "user.role": "info",
+  "app.redeploy": "info", "app.restart": "info", "queue.concurrency": "info", "app.rollback": "info", "user.quota": "info", "user.role": "info",
 };
 
 function describe(e: AuditEntry): string {
   const verbs: Record<string, string> = {
     "app.start": "started", "app.stop": "stopped", "app.restart": "restarted", "app.redeploy": "redeployed",
     "app.rollback": "rolled back", "app.suspend": "suspended", "app.resume": "lifted the suspension on",
-    "app.delete": "deleted", "deployment.delete": "deleted a deployment of", "queue.cancel": "removed from the queue",
+    "app.delete": "deleted", "deployment.delete": "deleted a deployment of", "queue.cancel": "removed from the queue", "queue.concurrency": "set builds at once:",
     "user.quota": "changed the quota of", "user.block_deploy": "blocked deploys for", "user.allow_deploy": "restored deploys for",
     "user.disable": "disabled", "user.enable": "enabled", "user.role": "changed the role of", "user.update": "updated",
   };
@@ -71,7 +71,7 @@ export default function AuditPage() {
   }, [data]);
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <div>
         <Eyebrow>Operations</Eyebrow>
         <h1 className="mt-3 text-[2rem] font-semibold leading-tight">Audit log</h1>
@@ -95,7 +95,7 @@ export default function AuditPage() {
           Starting, stopping, suspending or redeploying a student&apos;s app, or changing an account, is recorded here.
         </EmptyState>
       ) : (
-        <ol className="plate divide-y divide-[var(--hairline)] overflow-hidden">
+        <ol className="plate thin-scroll table-frame divide-y divide-[var(--hairline)]">
           {data.events.map((e) => {
             const href = targetHref(e);
             const detail = e.detail ? Object.entries(e.detail).filter(([k]) => k !== "deployment") : [];

@@ -850,3 +850,91 @@ def test_an_unreadable_package_json_is_left_to_the_buildpack(tmp_path):
     """Reporting malformed JSON is the buildpack's job, not ours."""
     (tmp_path / "package.json").write_text("{ not json", encoding="utf-8")
     assert build_service.node_version_default(tmp_path, {}) == {}
+
+
+# --- Instant redeploys ------------------------------------------------------
+
+async def _built_twice(client, db_session, user_credentials, monkeypatch, tmp_path, *, fresh=False, change_env=False):
+    """Build a target, then build it again from the same commit."""
+    from app.builder import reuse
+    from app.core.crypto import encrypt_value
+    from app.models.environment import EnvironmentVariable
+
+    res = await client.post("/auth/signup", json=user_credentials)
+    user_id = uuid.UUID(res.json()["user"]["id"])
+    repository = await _target(db_session, user_id, deploy_path="backend")
+    calls = _stub_build_environment(
+        monkeypatch, tmp_path,
+        outcome=BuildOutcome(succeeded=True, exit_code=0, duration_seconds=12.0),
+        source_files=("backend/requirements.txt",),
+    )
+    builds = []
+    original = build_service.pack.run_pack_build
+
+    async def counting(**kwargs):
+        builds.append(kwargs)
+        return await original(**kwargs)
+
+    monkeypatch.setattr(build_service.pack, "run_pack_build", counting)
+
+    async def present(image_ref):
+        return image_ref in calls["pushed"]
+
+    monkeypatch.setattr(reuse.docker, "image_present", present)
+
+    first = Deployment(repository_id=repository.id, user_id=user_id, status=DeploymentStatus.QUEUED)
+    db_session.add(first)
+    await db_session.commit()
+    await build_service.run_build(first.id, db=db_session)
+
+    if change_env:
+        db_session.add(EnvironmentVariable(repository_id=repository.id, key="NODE_ENV",
+                                           value_enc=encrypt_value("production")))
+        await db_session.commit()
+
+    second = Deployment(repository_id=repository.id, user_id=user_id, status=DeploymentStatus.QUEUED)
+    db_session.add(second)
+    await db_session.commit()
+    await build_service.run_build(second.id, db=db_session, fresh=fresh)
+
+    await db_session.refresh(first)
+    await db_session.refresh(second)
+    return first, second, builds
+
+
+@pytest.mark.asyncio
+async def test_the_same_commit_is_not_built_twice(client, db_session, user_credentials, monkeypatch, tmp_path):
+    first, second, builds = await _built_twice(client, db_session, user_credentials, monkeypatch, tmp_path)
+
+    assert len(builds) == 1
+    assert second.status == DeploymentStatus.BUILT
+    assert second.image_ref == first.image_ref
+    assert second.reused_from_id == first.id
+    assert first.build_fingerprint and second.build_fingerprint == first.build_fingerprint
+
+
+@pytest.mark.asyncio
+async def test_rebuild_from_scratch_builds_anyway(client, db_session, user_credentials, monkeypatch, tmp_path):
+    _, second, builds = await _built_twice(client, db_session, user_credentials, monkeypatch, tmp_path, fresh=True)
+
+    assert len(builds) == 2
+    assert second.reused_from_id is None
+
+
+@pytest.mark.asyncio
+async def test_a_changed_build_environment_is_built_again(client, db_session, user_credentials, monkeypatch, tmp_path):
+    """Buildpacks read env vars at build time, so a change means a new image."""
+    _, second, builds = await _built_twice(client, db_session, user_credentials, monkeypatch, tmp_path, change_env=True)
+
+    assert len(builds) == 2
+    assert second.reused_from_id is None
+
+
+def test_a_dockerfile_build_ignores_the_runtime_environment():
+    from app.builder.reuse import fingerprint
+
+    a = fingerprint(commit_sha="c" * 40, deploy_path="api", method=BuildMethod.DOCKER, env={})
+    b = fingerprint(commit_sha="c" * 40, deploy_path="api", method=BuildMethod.DOCKER, env={"X": "1"})
+    assert a == b
+    assert fingerprint(commit_sha=None, deploy_path="api", method=BuildMethod.DOCKER, env={}) is None
+    assert fingerprint(commit_sha="c" * 40, deploy_path="api", method=BuildMethod.COMPOSE, env={}) is None

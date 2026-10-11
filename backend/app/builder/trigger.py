@@ -56,6 +56,7 @@ async def trigger_build(
     *,
     actor: str = "owner",
     background_tasks: BackgroundTasks | None = None,
+    fresh: bool = False,
 ) -> Deployment:
     """
     Start a new build of `repository`, owned by `owner`.
@@ -70,12 +71,19 @@ async def trigger_build(
             raise ConflictError(suspension)
 
     if settings.builds_on_actions:
-        return await _on_actions(db, repository, owner, actor, background_tasks)
-    return await _on_queue(db, repository, owner, actor)
+        deployment = await _on_actions(db, repository, owner, actor, background_tasks)
+    else:
+        deployment = await _on_queue(db, repository, owner, actor, fresh=fresh)
+
+    # From the first deploy on, a push deploys too. Never raises.
+    from app.services import webhook_sync
+
+    await webhook_sync.ensure_for(db, repository)
+    return deployment
 
 
 async def _on_queue(
-    db: AsyncSession, repository: Repository, owner: User, actor: str
+    db: AsyncSession, repository: Repository, owner: User, actor: str, *, fresh: bool = False
 ) -> Deployment:
     # Only a buildpack build needs `pack`. A repository with its own Dockerfile
     # is built by Docker alone, and demanding an unrelated tool before starting
@@ -119,7 +127,7 @@ async def _on_queue(
     await db.refresh(deployment)
 
     try:
-        await enqueue_build(deployment, label=repository.target_label)
+        await enqueue_build(deployment, label=repository.target_label, fresh=fresh, actor=actor)
     except Exception as exc:  # noqa: BLE001 — Redis down: say so, leave no stuck row
         logger.exception("Could not queue the build of %s", deployment.id)
         deployment.status = DeploymentStatus.FAILED
@@ -176,8 +184,9 @@ async def _on_actions(
     if actor != "owner":
         await record(
             db, deployment.id, "build",
-            "Build requested by an administrator.", actor=actor,
-            level=EventLevel.INFO,
+            "Build started by a push to GitHub." if actor == "github"
+            else "Build requested by an administrator.",
+            actor=actor, level=EventLevel.INFO,
         )
     if background_tasks is not None:
         background_tasks.add_task(ci_service.dispatch, deployment.id)

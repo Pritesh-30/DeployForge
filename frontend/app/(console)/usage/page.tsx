@@ -12,7 +12,8 @@ import { useEffect, useMemo, useState } from "react";
 
 import { Meter, RankedBars, StatTile } from "@/components/charts";
 import { useSession } from "@/components/Session";
-import { Eyebrow, SectionTitle, Skeleton } from "@/components/ui";
+import { CpuIcon, GaugeIcon } from "@/components/Icons";
+import { Eyebrow, Panel, PanelEmpty, Skeleton } from "@/components/ui";
 import { apiFetch } from "@/lib/api";
 import { appsPulse, listApps, type App, type AppPulse } from "@/lib/apps";
 import { isRunning, type Deployment } from "@/lib/deployments";
@@ -48,7 +49,7 @@ export default function UsagePage() {
   const totalCpu = running.reduce((s, a) => s + (pulse[a.id]?.latest?.cpu ?? 0), 0);
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <div>
         <Eyebrow>Account</Eyebrow>
         <h1 className="mt-3 text-[2rem] font-semibold leading-tight">Usage &amp; limits</h1>
@@ -68,22 +69,21 @@ export default function UsagePage() {
         <StatTile label="Build minutes" value={buildMinutes.toFixed(1)} hint="this month" />
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        <section>
-          <SectionTitle hint="Live, sampled every few seconds.">Memory by app</SectionTitle>
-          <div className="plate p-5">
-            {apps === null ? <Skeleton className="h-32" /> : running.length === 0 ? (
-              <p className="text-sm text-[var(--text-dim)]">Nothing is running right now.</p>
-            ) : (
-              <RankedBars format={(v) => bytes(v)}
-                rows={running.map((a) => ({ label: a.name, value: pulse[a.id]?.latest?.mem ?? 0 }))
-                  .sort((x, y) => y.value - x.value)} />
-            )}
-          </div>
-        </section>
-        <section>
-          <SectionTitle hint="What each app may use, and how fast deploys may come.">Limits</SectionTitle>
-          <dl className="plate divide-y divide-[var(--hairline)]">
+      <div className="grid gap-4 lg:h-[26rem] lg:grid-cols-2">
+        <Panel title="Memory by app" icon={<CpuIcon className="h-4 w-4" />} hint="Live, sampled every few seconds."
+          footer={running.length > 0 && meta?.app_memory_limit ? <>Each app may use up to {meta.app_memory_limit}.</> : undefined}>
+          {apps === null ? <Skeleton className="h-32" /> : running.length === 0 ? (
+            <PanelEmpty icon={<CpuIcon className="h-6 w-6" />} title="Nothing is running right now">
+              Start or deploy an app and its memory use shows up here within a few seconds.
+            </PanelEmpty>
+          ) : (
+            <RankedBars format={(v) => bytes(v)}
+              rows={running.map((a) => ({ label: a.name, value: pulse[a.id]?.latest?.mem ?? 0 }))
+                .sort((x, y) => y.value - x.value)} />
+          )}
+        </Panel>
+        <Panel title="Limits" icon={<GaugeIcon className="h-4 w-4" />} hint="What each app may use, and how fast deploys may come." flush>
+          <dl className="divide-y divide-[var(--hairline)]">
             {[
               ["Apps running at once", `${quota}`, "Raise it by asking an administrator."],
               ["Memory per app", meta?.app_memory_limit ?? "—", "An app that needs more is stopped by the kernel, not slowed."],
@@ -101,7 +101,7 @@ export default function UsagePage() {
               </div>
             ))}
           </dl>
-        </section>
+        </Panel>
       </div>
     </div>
   );

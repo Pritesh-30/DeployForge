@@ -7,10 +7,11 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { Select } from "@/components/Controls";
 
 import { useApp } from "@/components/app/AppFrame";
 import LogViewer from "@/components/LogViewer";
-import { cx } from "@/components/ui";
+import { cx, relativeTime } from "@/components/ui";
 import { isRunning } from "@/lib/deployments";
 
 type Source = "runtime" | "build";
@@ -48,18 +49,22 @@ export default function AppLogs() {
           ))}
         </div>
 
-        <select
+        <Select
+          ariaLabel="Deployment"
+          variant="pill"
           value={(source === "runtime" ? runtimeTarget?.id : chosen?.id) ?? ""}
-          onChange={(e) => setDeploymentId(e.target.value)}
-          className="rounded-[var(--r-sm)] border border-[var(--hairline-strong)] bg-[var(--surface-2)] px-3 py-1.5 text-xs outline-none"
-        >
-          {(source === "runtime" ? ran : app.deployments).map((d) => (
-            <option key={d.id} value={d.id}>
-              {d.commit_sha?.slice(0, 7) ?? d.id.slice(0, 8)} · {d.status}
-              {d.id === app.current?.id ? " · current" : ""}
-            </option>
-          ))}
-        </select>
+          onChange={setDeploymentId}
+          menuClassName="w-72"
+          options={(source === "runtime" ? ran : app.deployments).map((d) => {
+            const text = `${d.commit_sha?.slice(0, 7) ?? d.id.slice(0, 8)} · ${d.status}${d.id === app.current?.id ? " · current" : ""}`;
+            return {
+              value: d.id,
+              text,
+              label: <span className="font-[family-name:var(--font-jetbrains-mono)] text-xs">{text}</span>,
+              hint: relativeTime(d.created_at),
+            };
+          })}
+        />
 
         <p className="text-xs text-[var(--text-dim)]">
           {source === "runtime"

@@ -166,6 +166,7 @@ end
 -- place because a machine fell over would be unfair. Out of attempts, it
 -- is given up on and reported so its owner can be told.
 local dead = {}
+local reclaimed = {}
 local expired = redis.call('ZRANGEBYSCORE', p .. ':q:lease', '-inf', now, 'LIMIT', 0, 100)
 for _, id in ipairs(expired) do
   local jk = p .. ':q:job:' .. id
@@ -181,9 +182,10 @@ for _, id in ipairs(expired) do
     redis.call('LPUSH', p .. ':q:t:' .. tenant, id)
     ring_add(tenant)
     redis.call('HINCRBY', p .. ':q:stats', 'reclaimed', 1)
+    table.insert(reclaimed, id)
   end
 end
-return dead
+return {dead, reclaimed}
 """
 
 _CANCEL = _FINISH_FN + """
@@ -391,8 +393,41 @@ class JobQueue:
         Promote retries that are due and reclaim jobs whose worker died.
         Returns the jobs given up on, so the caller can tell their owners.
         """
-        dead = await self._call("maintain", _MAINTAIN, now_ms())
-        return list(dead or [])
+        dead, _ = await self.maintain_detailed()
+        return dead
+
+    async def maintain_detailed(self) -> tuple[list[str], list[str]]:
+        """As `maintain`, also returning the jobs put back in line."""
+        result = await self._call("maintain", _MAINTAIN, now_ms())
+        dead, reclaimed = result if result else ([], [])
+        return list(dead or []), list(reclaimed or [])
+
+    # --- liveness ----------------------------------------------------------
+    #
+    # A lease only lapses after `queue_lease_seconds`, which must be long
+    # enough to ride out a slow heartbeat. When a worker process is simply
+    # gone — the server restarted — waiting that long leaves a build showing
+    # "building" for a minute with nothing building it. So each worker also
+    # keeps a short-lived "alive" key, and a lease held by a worker whose key
+    # has expired is cut short and reclaimed on the next pass.
+
+    async def mark_alive(self, worker: str, *, ttl_seconds: int) -> None:
+        await self.redis.set(self._key("alive", worker), "1", ex=ttl_seconds)
+
+    async def expire_orphans(self) -> list[str]:
+        """Cut short the leases of workers that are no longer alive."""
+        leased = await self.redis.zrange(self._key("lease"), 0, -1)
+        orphans = []
+        for job_id in leased:
+            holder = await self.redis.hget(self._key("job", job_id), "worker")
+            if not holder:
+                continue
+            process = holder.rsplit("/", 1)[0]
+            if not await self.redis.exists(self._key("alive", process)):
+                orphans.append(job_id)
+        if orphans:
+            await self.redis.zadd(self._key("lease"), {job_id: 0 for job_id in orphans}, xx=True)
+        return orphans
 
     # --- reading -----------------------------------------------------------
 
@@ -423,6 +458,27 @@ class JobQueue:
         if index is None:
             return None
         return queue_position(ring, lengths, job.tenant, index), sum(lengths.values())
+
+    async def concurrency(self) -> int:
+        """
+        How many builds may run at once. An administrator's setting, kept in
+        Redis so every worker process sees the same number and it survives a
+        restart; the configured default until one is set.
+        """
+        raw = await self.redis.get(self._key("concurrency"))
+        try:
+            value = int(raw) if raw is not None else settings.build_concurrency
+        except ValueError:
+            value = settings.build_concurrency
+        return max(1, min(value, settings.build_concurrency_max))
+
+    async def set_concurrency(self, value: int | None) -> int:
+        """Set the limit (None returns to the configured default)."""
+        if value is None:
+            await self.redis.delete(self._key("concurrency"))
+        else:
+            await self.redis.set(self._key("concurrency"), max(1, min(int(value), settings.build_concurrency_max)))
+        return await self.concurrency()
 
     async def stats(self) -> dict[str, int]:
         raw = await self.redis.hgetall(self._key("stats"))

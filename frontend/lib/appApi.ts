@@ -39,6 +39,8 @@ import {
   type Window,
 } from "@/lib/apps";
 import {
+  adminCiProgress,
+  ciProgress,
   diagnoseDeployment,
   getBuildLogs,
   getDeployment,
@@ -48,6 +50,7 @@ import {
   startDeployment,
   stopDeployment,
   type AiDiagnosis,
+  type CiProgress,
   type BuildLogs,
   type Deployment,
   type DeploymentEvent,
@@ -68,7 +71,7 @@ export type AppApi = {
   start: (app: AppDetail) => Promise<void>;
   stop: (app: AppDetail) => Promise<void>;
   restart: (app: AppDetail) => Promise<void>;
-  redeploy: (app: AppDetail) => Promise<string>;
+  redeploy: (app: AppDetail, fresh?: boolean) => Promise<string>;
   promote: (app: AppDetail, deploymentId: string) => Promise<void>;
   remove: (app: AppDetail) => Promise<void>;
   suspend?: (app: AppDetail, reason: string) => Promise<void>;
@@ -78,6 +81,7 @@ export type AppApi = {
   buildLog: (id: string) => Promise<BuildLogs>;
   events: (id: string) => Promise<DeploymentEvent[]>;
   diagnose: (id: string, refresh?: boolean) => Promise<AiDiagnosis>;
+  ciProgress: (id: string) => Promise<CiProgress>;
   buildLogStream: (id: string, offset?: number) => string;
   runtimeLogStream: (id: string) => string;
 };
@@ -120,8 +124,8 @@ export const ownerApi: AppApi = {
     if (!live) throw new Error("This app is not running.");
     await restartDeployment(live.id);
   },
-  async redeploy(app) {
-    return (await redeployApp(app.id)).deployment_id;
+  async redeploy(app, fresh) {
+    return (await redeployApp(app.id, fresh)).deployment_id;
   },
   async promote(app, deploymentId) {
     await promoteDeployment(app.id, deploymentId);
@@ -133,6 +137,7 @@ export const ownerApi: AppApi = {
   buildLog: getBuildLogs,
   events: getEvents,
   diagnose: diagnoseDeployment,
+  ciProgress,
   buildLogStream: (id, offset = 0) => `/deployments/${id}/logs/stream?offset=${offset}`,
   runtimeLogStream: (id) => `/deployments/${id}/runtime-logs/stream?tail=300`,
 };
@@ -153,8 +158,8 @@ export const adminApi: AppApi = {
   async restart(app) {
     await adminRestartApp(app.id);
   },
-  async redeploy(app) {
-    return (await adminRedeployApp(app.id)).deployment_id;
+  async redeploy(app, fresh) {
+    return (await adminRedeployApp(app.id, fresh)).deployment_id;
   },
   async promote(app, deploymentId) {
     // An administrator rolls back by starting that version as the owner would.
@@ -173,6 +178,7 @@ export const adminApi: AppApi = {
   buildLog: adminBuildLogs,
   events: adminEvents,
   diagnose: adminDiagnose,
+  ciProgress: adminCiProgress,
   buildLogStream: (id, offset = 0) => `/admin/deployments/${id}/logs/stream?offset=${offset}`,
   runtimeLogStream: (id) => `/admin/deployments/${id}/runtime-logs/stream?tail=300`,
 };

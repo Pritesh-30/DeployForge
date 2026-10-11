@@ -52,6 +52,7 @@ export function DeploymentRow({
         )}
         {!compact && d.build_method && <span className="text-xs text-[var(--text-dim)]">{d.build_method}</span>}
         {!compact && d.ci_trigger === "push" && <Badge>push</Badge>}
+        {d.reused_from_id && <span title="Same commit and settings as an earlier build, so its image was reused."><Badge tone="info">instant</Badge></span>}
         <span className="text-xs text-[var(--text-dim)]">{relativeTime(d.created_at)}</span>
         {d.build_started_at && d.build_finished_at && (
           <span className="tabular text-xs text-[var(--text-dim)]">· {duration(d.build_started_at, d.build_finished_at)}</span>

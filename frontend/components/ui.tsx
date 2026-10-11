@@ -51,6 +51,91 @@ export function Card({
   return bezel ? <div className="bezel">{panel}</div> : panel;
 }
 
+/**
+ * A titled panel whose body scrolls inside itself.
+ *
+ * The layout rule for the whole console: panels that sit side by side share
+ * one height, set by the row they are in. Content longer than that scrolls
+ * within the panel — the page does not grow, and the neighbour is not left
+ * beside a void. Content shorter than that is centred by `empty` rather than
+ * stranded at the top of an empty box.
+ *
+ * Give the row (or the panel) its height; the panel fills it.
+ */
+export function Panel({
+  title,
+  icon,
+  hint,
+  action,
+  children,
+  className,
+  bodyClassName,
+  footer,
+  flush = false,
+}: {
+  title: ReactNode;
+  icon?: ReactNode;
+  hint?: ReactNode;
+  action?: ReactNode;
+  children: ReactNode;
+  className?: string;
+  bodyClassName?: string;
+  footer?: ReactNode;
+  /** Body without padding, for lists and tables that run edge to edge. */
+  flush?: boolean;
+}) {
+  return (
+    <section className={cx("plate flex min-h-0 flex-col overflow-hidden", className)}>
+      <header className="flex shrink-0 items-start justify-between gap-4 border-b border-[var(--hairline)] px-5 py-3.5">
+        <div className="min-w-0">
+          <h2 className="flex items-center gap-2 text-[14px] font-semibold">
+            {icon && <span className="text-[var(--text-dim)]">{icon}</span>}
+            {title}
+          </h2>
+          {hint && <p className="mt-0.5 text-xs leading-relaxed text-[var(--text-dim)]">{hint}</p>}
+        </div>
+        {action && <div className="shrink-0 text-xs">{action}</div>}
+      </header>
+      <div className={cx("thin-scroll min-h-0 flex-1 overflow-y-auto", !flush && "p-5", bodyClassName)}>
+        {children}
+      </div>
+      {footer && <footer className="shrink-0 border-t border-[var(--hairline)] px-5 py-3 text-xs text-[var(--text-dim)]">{footer}</footer>}
+    </section>
+  );
+}
+
+/** A centred message filling an otherwise empty panel body. */
+export function PanelEmpty({ icon, title, children, action, grow = false }: {
+  icon?: ReactNode;
+  title: string;
+  children?: ReactNode;
+  action?: ReactNode;
+  /**
+   * Below other content in a flex column: take the space that is left rather
+   * than the panel's whole height, which would push the content out of view.
+   */
+  grow?: boolean;
+}) {
+  return (
+    <div className={cx(
+      "flex min-h-[8rem] flex-col items-center justify-center px-6 py-8 text-center",
+      grow ? "flex-1" : "h-full",
+    )}>
+      {icon && <div className="mb-3 text-[var(--text-dim)]">{icon}</div>}
+      <p className="text-sm font-medium text-[var(--text-muted)]">{title}</p>
+      {children && <p className="mt-1.5 max-w-xs text-xs leading-relaxed text-[var(--text-dim)]">{children}</p>}
+      {action && <div className="mt-4">{action}</div>}
+    </div>
+  );
+}
+
+/**
+ * The page's height budget for a full-height workspace (the code view, a
+ * log, a long table): the viewport minus the console's chrome, never less
+ * than a usable minimum. One value, so every workspace ends at the same line.
+ */
+export const WORKSPACE_HEIGHT = "h-[calc(100dvh-15rem)] min-h-[30rem]";
+
 export function SectionTitle({
   children,
   hint,

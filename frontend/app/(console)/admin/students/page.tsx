@@ -72,7 +72,7 @@ export default function StudentsPage() {
       {rows === null ? (
         <div className="space-y-2">{[0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-16" />)}</div>
       ) : (
-        <div className="plate thin-scroll overflow-x-auto">
+        <div className="plate thin-scroll table-frame">
           <table className="w-full min-w-[60rem] text-sm">
             <thead>
               <tr className="border-b border-[var(--hairline)] text-left text-[11px] uppercase tracking-[0.12em] text-[var(--text-dim)]">

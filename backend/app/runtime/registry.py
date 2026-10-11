@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import shutil
 import tempfile
 import uuid
@@ -23,6 +24,38 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.github.crypto import decrypt_token
 from app.github.token import get_connection
+
+
+def _plugin_dirs() -> list[str]:
+    """
+    Where this machine's Docker CLI plugins live, as the user's own config sees it.
+
+    A throwaway DOCKER_CONFIG hides plugins installed under the user's config
+    directory — and on Docker Desktop that is where `docker compose` lives
+    (`~/.docker/cli-plugins`). Without them `docker compose ... --file` is read
+    as `docker --file` and fails with "unknown flag: --file". Linux packages
+    put compose in a system directory Docker always searches, which is why a
+    server never noticed.
+    """
+    home = Path(os.environ.get("DOCKER_CONFIG") or Path.home() / ".docker")
+    dirs: list[str] = []
+    try:
+        config = json.loads((home / "config.json").read_text(encoding="utf-8"))
+        dirs.extend(str(d) for d in config.get("cliPluginsExtraDirs") or [])
+    except (OSError, ValueError):
+        pass
+    if (home / "cli-plugins").is_dir():
+        dirs.append(str(home / "cli-plugins"))
+    return list(dict.fromkeys(dirs))
+
+
+def client_config(auths: dict) -> dict:
+    """A Docker client config with these logins that still finds every plugin."""
+    config: dict = {"auths": auths}
+    plugins = _plugin_dirs()
+    if plugins:
+        config["cliPluginsExtraDirs"] = plugins
+    return config
 
 
 def needs_credentials(image_ref: str | None) -> bool:
@@ -59,7 +92,7 @@ async def credentials_for(
         ).decode()
         registry = settings.ci_registry.strip().rstrip("/")
         (directory / "config.json").write_text(
-            json.dumps({"auths": {registry: {"auth": auth}}}), encoding="utf-8"
+            json.dumps(client_config({registry: {"auth": auth}})), encoding="utf-8"
         )
         yield directory
     finally:

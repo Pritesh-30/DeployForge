@@ -752,3 +752,40 @@ async def test_a_failed_build_still_records_how_it_was_built(
     await db_session.refresh(deployment)
     assert deployment.build_method is BuildMethod.COMPOSE
     assert "uploading it to GitHub's registry failed" in deployment.error_message
+
+
+@pytest.mark.asyncio
+async def test_copying_into_the_registry_is_its_own_visible_stage(
+    client, db_session, user_credentials, monkeypatch
+):
+    """The deployment page shows "Copy to registry" running, then done."""
+    from app.models.event import DeploymentEvent
+
+    _, deployment_id = await _building(client, db_session, user_credentials)
+    image = f"ghcr.io/octocat/amvex/app:{SHA[:12]}"
+    seen_status = []
+
+    async def fake_mirror(db, user_id, images, log_file):
+        seen_status.append((await db.get(Deployment, uuid.UUID(deployment_id))).status)
+        return {key: f"localhost:5000/deployforge/{ref.split('/', 1)[1]}" for key, ref in images.items()}
+
+    async def fake_start(db, deployment, repository, user, *, actor):
+        return deployment
+
+    monkeypatch.setattr(ci_service.mirror, "mirror_images", fake_mirror)
+    monkeypatch.setattr(ci_service.runtime, "start", fake_start)
+    await ci_service.finish(
+        db_session, await oidc.verify_run_token(run_token()),
+        deployment_id=uuid.UUID(deployment_id), status="success", method="docker",
+        image=image, services=None, log="", error=None,
+    )
+    await ci_service.after_build(uuid.UUID(deployment_id), {"": image}, db=db_session)
+
+    assert seen_status == [DeploymentStatus.PUSHING]
+    events = (await db_session.execute(
+        DeploymentEvent.__table__.select().where(
+            DeploymentEvent.deployment_id == uuid.UUID(deployment_id), DeploymentEvent.stage == "push")
+    )).all()
+    assert any("Stored in the registry: localhost:5000/" in e.message for e in events)
+    deployment = await db_session.get(Deployment, uuid.UUID(deployment_id))
+    assert deployment.image_ref.startswith("localhost:5000/")

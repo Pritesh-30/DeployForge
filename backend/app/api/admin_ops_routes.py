@@ -16,12 +16,14 @@ to have it read by someone else.
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +31,7 @@ from app.api.app_routes import activity_for
 from app.api.deployment_routes import (
     build_log_snapshot,
     build_log_stream,
+    ci_progress_for,
     deployment_out,
     diagnose_deployment,
     events_of,
@@ -36,6 +39,7 @@ from app.api.deployment_routes import (
 )
 from app.auth.dependencies import AdminUser
 from app.builder.trigger import trigger_build
+from app.config import settings
 from app.core.errors import ConflictError, NotFoundError
 from app.db import get_db
 from app.metrics import sampling
@@ -217,12 +221,13 @@ async def restart_app(app_id: uuid.UUID, admin: AdminUser, db: DbSession) -> App
 
 @router.post("/apps/{app_id}/redeploy", response_model=BuildStartedOut, status_code=status.HTTP_202_ACCEPTED)
 async def redeploy_app(
-    app_id: uuid.UUID, admin: AdminUser, db: DbSession, background_tasks: BackgroundTasks
+    app_id: uuid.UUID, admin: AdminUser, db: DbSession, background_tasks: BackgroundTasks,
+    fresh: bool = False,
 ) -> BuildStartedOut:
     """Build a student's app again from its branch, as they would."""
     repository, owner = await _app_with_owner(db, app_id)
     deployment = await trigger_build(
-        db, repository, owner, actor="admin", background_tasks=background_tasks
+        db, repository, owner, actor="admin", background_tasks=background_tasks, fresh=fresh
     )
     await audit(db, admin, "app.redeploy", target_type="app", target_id=repository.id,
                 target_label=repository.target_label, subject_user_id=owner.id,
@@ -385,14 +390,50 @@ async def queue_snapshot(_admin: AdminUser, db: DbSession) -> dict:
         "delayed": [job(j) for j in snapshot.delayed],
         "recent": [job(j) for j in snapshot.recent],
         "stats": stats,
-        "concurrency": _concurrency(),
+        **(await _concurrency_out()),
     }
 
 
-def _concurrency() -> int:
-    from app.config import settings
+async def _concurrency_out() -> dict:
+    return {
+        "concurrency": await queue.concurrency(),
+        "concurrency_default": settings.build_concurrency,
+        "concurrency_max": settings.build_concurrency_max,
+        "cpus": os.cpu_count() or 1,
+    }
 
-    return settings.build_concurrency
+
+class ConcurrencyIn(BaseModel):
+    # None goes back to the configured default.
+    value: int | None = Field(default=None, ge=1, le=64)
+
+
+@router.put("/queue/concurrency")
+async def set_concurrency(body: ConcurrencyIn, admin: AdminUser, db: DbSession) -> dict:
+    """
+    How many builds run at once. Takes effect within seconds and survives a
+    restart. Lowering it lets running builds finish; it only stops new ones
+    starting until the count is under the new limit.
+    """
+    before = await queue.concurrency()
+    after = await queue.set_concurrency(body.value)
+    if after != before:
+        await audit(db, admin, "queue.concurrency", target_type="queue", target_id="builds",
+                    target_label=f"{before} → {after} builds at once")
+    return await _concurrency_out()
+
+
+@router.post("/webhooks/sync")
+async def sync_webhooks(_admin: AdminUser) -> dict:
+    """Point every app's GitHub webhook at this server's current address."""
+    from app.github import webhooks
+    from app.services.webhook_sync import sync_all
+
+    if not webhooks.enabled():
+        raise ConflictError(
+            "Webhooks are off: set GITHUB_WEBHOOK_SECRET and an https PUBLIC_API_URL."
+        )
+    return {"synced": await sync_all()}
 
 
 @router.post("/queue/{job_id}/cancel")
@@ -559,6 +600,12 @@ async def _any_deployment(db: AsyncSession, deployment_id: uuid.UUID) -> tuple[D
 async def any_deployment(deployment_id: uuid.UUID, _admin: AdminUser, db: DbSession) -> DeploymentOut:
     d, r, u = await _any_deployment(db, deployment_id)
     return deployment_out(d, r, user_email=u.email)
+
+
+@router.get("/deployments/{deployment_id}/ci-progress")
+async def any_ci_progress(deployment_id: uuid.UUID, _admin: AdminUser, db: DbSession) -> dict:
+    d, r, _ = await _any_deployment(db, deployment_id)
+    return await ci_progress_for(db, d, r)
 
 
 @router.get("/deployments/{deployment_id}/logs", response_model=BuildLogsOut)

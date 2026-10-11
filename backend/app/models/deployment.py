@@ -213,6 +213,19 @@ class Deployment(Base, UUIDMixin, TimestampMixin):
     # {summary, cause, fix, confidence, model, created_at}.
     ai_diagnosis: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
+    # --- Instant redeploys (see app/builder/reuse.py) ---
+    # A hash of everything the image was built from. Two builds with the
+    # same fingerprint produce the same image, so the second is skipped.
+    build_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Set when this deployment skipped its build and runs an earlier one's
+    # image; the timeline and the build page say which.
+    reused_from_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True), nullable=True)
+
+    # The environment this deployment was last started with, as a short hash
+    # per key (never the values): how the platform knows whether an edited
+    # variable is in effect yet. See app/services/environment_state.py.
+    runtime_env: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
     target_server_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
     logs_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

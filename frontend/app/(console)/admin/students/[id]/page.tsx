@@ -12,10 +12,10 @@ import { useCallback, useEffect, useState } from "react";
 
 import { ActivityList } from "@/components/app/ActivityList";
 import { MakeAdmin, QuotaStepper, StudentActions } from "@/components/admin/StudentControls";
-import { Meter, StatTile } from "@/components/charts";
-import { ArrowLeft, ExternalIcon, GitHubIcon } from "@/components/Icons";
+import { Meter, RankedBars, StatTile } from "@/components/charts";
+import { ArrowLeft, BoxIcon, ExternalIcon, GitHubIcon, HistoryIcon, ShieldIcon } from "@/components/Icons";
 import { useSession } from "@/components/Session";
-import { Alert, Badge, Dot, SectionTitle, Skeleton, relativeTime } from "@/components/ui";
+import { Alert, Badge, Dot, Panel, PanelEmpty, Skeleton, relativeTime } from "@/components/ui";
 import { getUserDetail, type UserDetail } from "@/lib/admin";
 import { appKind, appState } from "@/lib/apps";
 import { isRunning } from "@/lib/deployments";
@@ -40,7 +40,7 @@ export default function StudentDetailPage() {
   const usage = data.usage;
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <Link href="/admin/students" className="inline-flex items-center gap-2 text-sm text-[var(--text-dim)] hover:text-[var(--text)]">
         <ArrowLeft className="h-3.5 w-3.5" />Students
       </Link>
@@ -90,57 +90,71 @@ export default function StudentDetailPage() {
         <StatTile label="Build minutes" value={usage.build_minutes} hint="all time" />
       </div>
 
-      <section>
-        <SectionTitle hint="Open one to run, redeploy, roll back, read its logs or suspend it.">Apps</SectionTitle>
-        {data.apps.length === 0 ? (
-          <p className="text-sm text-[var(--text-dim)]">No apps yet.</p>
-        ) : (
-          <ul className="plate divide-y divide-[var(--hairline)] overflow-hidden">
-            {data.apps.map((a) => {
-              const s = appState(a);
-              const live = a.current && isRunning(a.current.status) ? a.current : null;
-              return (
-                <li key={a.id}>
-                  <Link href={`/admin/apps/${a.id}`} className="flex flex-wrap items-center gap-3 px-4 py-3 transition-colors hover:bg-[var(--surface-2)]">
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium">{a.target_label}</p>
-                      <p className="truncate text-xs text-[var(--text-dim)]">
-                        {appKind(a)} · {a.deployment_count} build{a.deployment_count === 1 ? "" : "s"}
-                        {live?.url && <> · <span className="text-[var(--ok)]">{live.url.replace(/^https?:\/\//, "")}</span></>}
-                      </p>
-                    </div>
-                    <Badge tone={s.tone}><Dot tone={s.tone} pulse={s.live} />{s.label}</Badge>
-                  </Link>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </section>
-
-      <div className="grid gap-6 lg:grid-cols-2">
-        <section>
-          <SectionTitle>Recent activity</SectionTitle>
-          <ActivityList items={data.activity.slice(0, 12)} hrefFor={(a) => `/admin/apps/${a.app_id}`} />
-        </section>
-        <section>
-          <SectionTitle hint="Every administrator action on this account or its apps.">Administrator actions</SectionTitle>
-          {data.audit.length === 0 ? (
-            <p className="rounded-[var(--r)] border border-dashed border-[var(--hairline-strong)] px-4 py-10 text-center text-sm text-[var(--text-dim)]">None.</p>
+      <div className="grid gap-4 lg:h-[26rem] lg:grid-cols-[1.2fr_1fr]">
+        <Panel title="Apps" icon={<BoxIcon className="h-4 w-4" />}
+          hint="Open one to run, redeploy, roll back, read its logs or suspend it." flush
+          bodyClassName="flex flex-col"
+          action={<Badge>{data.apps.length}</Badge>}>
+          {data.apps.length === 0 ? (
+            <PanelEmpty icon={<BoxIcon className="h-6 w-6" />} title="No apps yet">
+              Apps appear here once this student connects a repository and deploys it.
+            </PanelEmpty>
           ) : (
-            <ol className="plate divide-y divide-[var(--hairline)] overflow-hidden">
-              {data.audit.map((e) => (
-                <li key={e.id} className="px-4 py-3 text-sm">
-                  <p><span className="font-medium">{e.action}</span> <span className="text-[var(--text-muted)]">{e.target_label}</span></p>
-                  <p className="mt-0.5 text-xs text-[var(--text-dim)]">by {e.actor_email} · {relativeTime(e.created_at)}
-                    {e.detail && Object.keys(e.detail).length > 0 && <> · {Object.entries(e.detail).map(([k, v]) => `${k}: ${String(v)}`).join(", ")}</>}
-                  </p>
-                </li>
-              ))}
-            </ol>
+            <ul className="divide-y divide-[var(--hairline)]">
+              {data.apps.map((a) => {
+                const s = appState(a);
+                const live = a.current && isRunning(a.current.status) ? a.current : null;
+                return (
+                  <li key={a.id}>
+                    <Link href={`/admin/apps/${a.id}`} className="flex flex-wrap items-center gap-3 px-4 py-3 transition-colors hover:bg-[var(--surface-2)]">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium">{a.target_label}</p>
+                        <p className="truncate text-xs text-[var(--text-dim)]">
+                          {appKind(a)} · {a.deployment_count} build{a.deployment_count === 1 ? "" : "s"}
+                          {live?.url && <> · <span className="text-[var(--ok)]">{live.url.replace(/^https?:\/\//, "")}</span></>}
+                        </p>
+                      </div>
+                      <Badge tone={s.tone}><Dot tone={s.tone} pulse={s.live} />{s.label}</Badge>
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
           )}
-        </section>
+          {/* A short list leaves room: use it for where the builds went. */}
+          {data.apps.length > 0 && data.apps.length < 6 && (
+            <div className="mt-auto border-t border-[var(--hairline)] px-5 py-3">
+              <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--text-dim)]">Builds per app</p>
+              <RankedBars format={(v) => `${v} build${v === 1 ? "" : "s"}`}
+                rows={[...data.apps].sort((a, b) => b.deployment_count - a.deployment_count)
+                  .map((a) => ({ label: a.target_label, value: a.deployment_count }))} />
+            </div>
+          )}
+        </Panel>
+        <Panel title="Recent activity" icon={<HistoryIcon className="h-4 w-4" />} flush>
+          <ActivityList items={data.activity.slice(0, 40)} hrefFor={(a) => `/admin/apps/${a.app_id}`} flush />
+        </Panel>
       </div>
+
+      <Panel title="Administrator actions" icon={<ShieldIcon className="h-4 w-4" />}
+        hint="Every administrator action on this account or its apps." flush className="max-h-[22rem]">
+        {data.audit.length === 0 ? (
+          <PanelEmpty icon={<ShieldIcon className="h-6 w-6" />} title="No administrator has acted on this account">
+            Suspensions, quota changes, restarts and redeploys made by an administrator are recorded here with who made them.
+          </PanelEmpty>
+        ) : (
+          <ol className="divide-y divide-[var(--hairline)]">
+            {data.audit.map((e) => (
+              <li key={e.id} className="px-5 py-3 text-sm">
+                <p><span className="font-medium">{e.action}</span> <span className="text-[var(--text-muted)]">{e.target_label}</span></p>
+                <p className="mt-0.5 text-xs text-[var(--text-dim)]">by {e.actor_email} · {relativeTime(e.created_at)}
+                  {e.detail && Object.keys(e.detail).length > 0 && <> · {Object.entries(e.detail).map(([k, v]) => `${k}: ${String(v)}`).join(", ")}</>}
+                </p>
+              </li>
+            ))}
+          </ol>
+        )}
+      </Panel>
     </div>
   );
 }

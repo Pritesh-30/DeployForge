@@ -35,14 +35,22 @@ def build_job_id(deployment_id: uuid.UUID) -> str:
 
 
 async def enqueue_build(
-    deployment: Deployment, *, label: str, q: JobQueue | None = None
+    deployment: Deployment,
+    *,
+    label: str,
+    fresh: bool = False,
+    actor: str = "owner",
+    q: JobQueue | None = None,
 ) -> str:
     """Put a deployment's build on the queue, under its owner's fair share."""
+    payload: dict = {"deployment_id": str(deployment.id), "actor": actor}
+    if fresh:
+        payload["fresh"] = True
     return await (q or queue).enqueue(
         kind=BUILD,
         job_id=build_job_id(deployment.id),
         tenant=str(deployment.user_id),
-        payload={"deployment_id": str(deployment.id)},
+        payload=payload,
         label=label,
     )
 
@@ -50,10 +58,33 @@ async def enqueue_build(
 async def _run_build(job: Job, context: JobContext) -> None:
     from app.builder.service import run_build
 
+    deployment_id = uuid.UUID(job.payload["deployment_id"])
     await run_build(
-        uuid.UUID(job.payload["deployment_id"]),
+        deployment_id,
         final_attempt=context.is_final_attempt,
+        fresh=bool(job.payload.get("fresh")),
     )
+    await _go_live(deployment_id, actor=job.payload.get("actor") or "owner")
+
+
+async def _go_live(deployment_id: uuid.UUID, *, actor: str) -> None:
+    """A build that finished here goes live, exactly as one from Actions does."""
+    from app.models.repository import Repository
+    from app.models.user import User
+    from app.runtime.service import go_live
+
+    async with AsyncSessionLocal() as db:
+        deployment = await db.get(Deployment, deployment_id)
+        if deployment is None or deployment.status is not DeploymentStatus.BUILT:
+            return
+        repository = await db.get(Repository, deployment.repository_id)
+        user = await db.get(User, deployment.user_id)
+        if repository is None or user is None:
+            return
+        try:
+            await go_live(db, deployment, repository, user, actor=actor)
+        except Exception:  # noqa: BLE001 — the build itself succeeded
+            logger.exception("Could not put %s live", deployment_id)
 
 
 async def _build_dead(job: Job, reason: str) -> None:
@@ -82,6 +113,31 @@ async def _build_dead(job: Job, reason: str) -> None:
         )
 
 
+async def _build_reclaimed(job: Job) -> None:
+    """
+    The server running this build stopped, and the build is back in line.
+    Say so on the row: it is waiting again, not building, and it will resume
+    by itself — nobody needs to press anything.
+    """
+    from app.runtime.service import record
+
+    deployment_id = uuid.UUID(job.payload["deployment_id"])
+    async with AsyncSessionLocal() as db:
+        deployment = await db.get(Deployment, deployment_id)
+        if deployment is None or deployment.status not in (
+            DeploymentStatus.BUILDING, DeploymentStatus.PUSHING,
+        ):
+            return
+        deployment.status = DeploymentStatus.QUEUED
+        await db.commit()
+        await record(
+            db, deployment_id, "queue",
+            "The server stopped during this build. It is back at the front of "
+            "the queue and will start again by itself.",
+            level=EventLevel.WARNING,
+        )
+
+
 HANDLERS: dict[str, JobType] = {
-    BUILD: JobType(run=_run_build, on_dead=_build_dead),
+    BUILD: JobType(run=_run_build, on_dead=_build_dead, on_reclaimed=_build_reclaimed),
 }

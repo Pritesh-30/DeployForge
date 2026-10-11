@@ -309,3 +309,21 @@ async def test_activity_spans_every_app(client, db_session, user_credentials):
 
     feed = (await client.get("/apps/activity", headers=headers)).json()
     assert {e["message"] for e in feed} == {"built a", "started b"}
+
+
+async def test_an_admin_can_change_how_many_builds_run_at_once(
+    client, db_session, user_credentials, admin_credentials
+):
+    headers, _ = await _signup(client, user_credentials)
+    assert (await client.put("/admin/queue/concurrency", json={"value": 4}, headers=headers)).status_code == 403
+
+    admin_headers, _ = await _admin(client, db_session, admin_credentials)
+    body = (await client.put("/admin/queue/concurrency", json={"value": 4}, headers=admin_headers)).json()
+    assert body["concurrency"] == 4
+    assert (await client.get("/admin/queue", headers=admin_headers)).json()["concurrency"] == 4
+
+    entry = (await client.get("/admin/audit", headers=admin_headers)).json()["events"][0]
+    assert entry["action"] == "queue.concurrency"
+
+    reset = (await client.put("/admin/queue/concurrency", json={"value": None}, headers=admin_headers)).json()
+    assert reset["concurrency"] == reset["concurrency_default"]

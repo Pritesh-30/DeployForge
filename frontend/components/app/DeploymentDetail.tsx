@@ -16,11 +16,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ConfirmDialog, toast } from "@/components/Feedback";
 import {
+  AlertIcon,
   ArrowLeft,
   CheckIcon,
   CommitIcon,
   ExternalIcon,
   GitHubIcon,
+  HistoryIcon,
   PlayIcon,
   RestartIcon,
   SparklesIcon,
@@ -30,9 +32,10 @@ import {
 } from "@/components/Icons";
 import LogViewer from "@/components/LogViewer";
 import { useSession } from "@/components/Session";
+import { useLive } from "@/lib/live";
 import StatusBadge from "@/components/StatusBadge";
 import Timeline from "@/components/Timeline";
-import { Alert, Badge, Button, Mono, Skeleton, Spinner, cx, duration, relativeTime } from "@/components/ui";
+import { Alert, Badge, Button, Mono, Panel, Skeleton, Spinner, cx, duration, relativeTime } from "@/components/ui";
 import type { AppApi } from "@/lib/appApi";
 import {
   deleteDeployment,
@@ -43,18 +46,41 @@ import {
   startDeployment,
   stopDeployment,
   type AiDiagnosis,
+  type CiProgress,
   type Deployment,
   type DeploymentEvent,
 } from "@/lib/deployments";
 import { dateTime } from "@/lib/format";
 
 const STAGES = [
-  { key: "queue", label: "Queued" },
-  { key: "download", label: "Source" },
-  { key: "build", label: "Build" },
-  { key: "push", label: "Store image" },
-  { key: "start", label: "Start" },
+  { key: "queue", label: "Queued", ci: "Waiting" },
+  { key: "download", label: "Source", ci: "Workflow" },
+  { key: "build", label: "Build on this server", ci: "Build on GitHub Actions" },
+  { key: "push", label: "Store image", ci: "Copy to registry" },
+  { key: "start", label: "Start", ci: "Start" },
 ] as const;
+
+/**
+ * What the active stage is doing, in a sentence. "Building" is where nearly
+ * all the time goes: dependencies are installed and the app compiled. Once
+ * an image exists, starting it and routing a domain to it takes seconds.
+ */
+function stageNote(d: Deployment, ci: boolean): string | null {
+  switch (d.status) {
+    case "queued":
+      return ci ? "Waiting for GitHub Actions to pick up the workflow run." : null;
+    case "building":
+      return ci
+        ? "GitHub Actions is installing dependencies and building the image in the repository's own runner. This server only waits; it pulls the finished image next."
+        : "This server is installing dependencies and compiling the app into an image. This is the slow part — starting the finished image takes seconds.";
+    case "pushing":
+      return ci ? "Copying the finished image from GitHub's registry into ours, so every version can be run again later." : "Storing the image in the registry, so this version can be run again later without rebuilding.";
+    case "starting":
+      return "Starting the container and routing its domain to it. Waiting for the app to answer before calling it live.";
+    default:
+      return null;
+  }
+}
 
 type StageState = "done" | "active" | "failed" | "pending" | "skipped";
 
@@ -95,6 +121,7 @@ export default function DeploymentDetail({ id, api }: { id: string; api: AppApi 
   const [pending, setPending] = useState<string | null>(null);
   const [diagnosis, setDiagnosis] = useState<AiDiagnosis | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [progress, setProgress] = useState<CiProgress | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(async () => {
@@ -110,6 +137,8 @@ export default function DeploymentDetail({ id, api }: { id: string; api: AppApi 
     }
   }, [api, id]);
 
+  useLive(() => void load(), (c) => c.deployment_id === id);
+
   useEffect(() => {
     let active = true;
     async function tick() {
@@ -123,6 +152,31 @@ export default function DeploymentDetail({ id, api }: { id: string; api: AppApi 
       if (timer.current) clearTimeout(timer.current);
     };
   }, [load]);
+
+  // A build on GitHub Actions: follow its steps while it runs, and read them
+  // once when it has finished so the page shows how it went.
+  const ciDeployment = d && (d.ci_trigger != null || d.ci_run_url) ? d.id : null;
+  const ciBusy = !!d && isBusy(d.status);
+  useEffect(() => {
+    if (!ciDeployment) return;
+    let active = true;
+    let t: ReturnType<typeof setTimeout> | undefined;
+    async function poll() {
+      try {
+        const next = await api.ciProgress(ciDeployment!);
+        if (!active) return;
+        setProgress(next);
+      } catch {
+        // Progress is a nicety; the pipeline still shows the stage.
+      }
+      if (active && ciBusy) t = setTimeout(poll, 3000);
+    }
+    poll();
+    return () => {
+      active = false;
+      if (t) clearTimeout(t);
+    };
+  }, [api, ciDeployment, ciBusy]);
 
   useEffect(() => {
     if (d && isRunning(d.status)) {
@@ -165,8 +219,14 @@ export default function DeploymentDetail({ id, api }: { id: string; api: AppApi 
   const method = methodMeta(d);
   const appHref = `${api.base}/${d.repository_id}`;
   const owner = api.mode === "owner";
+  // Only builds sent to GitHub Actions carry a trigger.
+  const ci = d.ci_trigger != null || !!d.ci_run_url;
+  const note = stageNote(d, ci);
+  // Built, but the start failed (a stack that would not come up, a port
+  // clash): the image is fine, so starting again needs no rebuild.
+  const failedAtStart = d.status === "failed" && !!d.build_finished_at && (!!d.image_ref || !!d.compose_project);
   const canStart = !d.suspended_by_admin && !isBusy(d.status) && !isRunning(d.status)
-    && (d.status === "built" || d.status === "stopped") && (!!d.image_ref || !!d.compose_project);
+    && (d.status === "built" || d.status === "stopped" || failedAtStart) && (!!d.image_ref || !!d.compose_project);
 
   return (
     <div className="space-y-6">
@@ -183,6 +243,11 @@ export default function DeploymentDetail({ id, api }: { id: string; api: AppApi 
               <StatusBadge status={d.status} />
               {d.suspended_by_admin && <Badge tone="danger">Suspended</Badge>}
               {d.ci_trigger === "push" && <Badge>push</Badge>}
+              {d.reused_from_id && (
+                <Link href={api.deploymentHref(d.reused_from_id)} title="Same commit and settings as this earlier build, so its image was reused instead of building again.">
+                  <Badge tone="info">Instant · reused {d.reused_from_id.slice(0, 8)}</Badge>
+                </Link>
+              )}
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-[13px] text-[var(--text-muted)]">
               {d.commit_sha && (
@@ -214,7 +279,8 @@ export default function DeploymentDetail({ id, api }: { id: string; api: AppApi 
               {canStart && (
                 <Button variant="primary" loading={pending === "start"} disabled={!!pending}
                   onClick={() => act("start", () => startDeployment(d.id), "Started.")}>
-                  {d.runtime_started_at ? <><UndoIcon className="h-3.5 w-3.5" />Run this version</> : <><PlayIcon className="h-3 w-3" />Start</>}
+                  {failedAtStart ? <><RestartIcon className="h-3.5 w-3.5" />Try starting again</>
+                    : d.runtime_started_at ? <><UndoIcon className="h-3.5 w-3.5" />Run this version</> : <><PlayIcon className="h-3 w-3" />Start</>}
                 </Button>
               )}
               {isRunning(d.status) && (
@@ -240,8 +306,23 @@ export default function DeploymentDetail({ id, api }: { id: string; api: AppApi 
         <ol className="mt-6 grid grid-cols-5 gap-2">
           {STAGES.map((s) => {
             const st = stages[s.key];
+            // While GitHub builds, its own steps fill the build stage's bar.
+            const steps = ci && s.key === "build" && progress && progress.total > 0 ? progress.steps : null;
             return (
               <li key={s.key} className="min-w-0">
+                {steps ? (
+                  <div className="flex h-1 gap-0.5" aria-label={`${progress!.completed} of ${progress!.total} steps done`}>
+                    {steps.map((step) => (
+                      <span key={step.number} title={step.name} className={cx(
+                        "h-1 flex-1 rounded-full",
+                        step.conclusion === "failure" || step.conclusion === "cancelled" ? "bg-[var(--danger)]"
+                          : step.status === "completed" ? "bg-[var(--ok)]"
+                          : step.status === "in_progress" ? "shimmer bg-[var(--info)]"
+                          : "bg-[var(--surface-3)]",
+                      )} />
+                    ))}
+                  </div>
+                ) : (
                 <div className={cx(
                   "h-1 rounded-full",
                   st === "done" && "bg-[var(--ok)]",
@@ -249,19 +330,24 @@ export default function DeploymentDetail({ id, api }: { id: string; api: AppApi 
                   st === "failed" && "bg-[var(--danger)]",
                   (st === "pending" || st === "skipped") && "bg-[var(--surface-3)]",
                 )} />
+                )}
                 <p className={cx(
                   "mt-2 flex items-center gap-1.5 truncate text-xs",
                   st === "failed" ? "text-[var(--danger)]" : st === "pending" || st === "skipped" ? "text-[var(--text-dim)]" : "text-[var(--text-muted)]",
                 )}>
                   {st === "done" && <CheckIcon className="h-3 w-3 text-[var(--ok)]" />}
                   {st === "active" && <Spinner className="h-3 w-3" />}
-                  {s.label}{st === "skipped" ? " · n/a" : ""}
+                  {ci ? s.ci : s.label}{st === "skipped" ? " · n/a" : ""}
+                  {steps && <span className="tabular text-[var(--text-dim)]">· {progress!.completed}/{progress!.total}</span>}
                 </p>
               </li>
             );
           })}
         </ol>
 
+        {note && <p className="mt-4 text-sm text-[var(--text-muted)]">{note}</p>}
+        {ci && progress && progress.steps.length > 0 && <CiSteps progress={progress} live={ciBusy} />}
+        {ci && progress?.error && <p className="mt-3 text-xs text-[var(--text-dim)]">Could not read the run&apos;s steps from GitHub: {progress.error}</p>}
         {d.status === "queued" && d.queue_position != null && (
           <p className="mt-4 text-sm text-[var(--info)]">
             {d.queue_position === 0 ? "Next to build." : `${d.queue_position} build${d.queue_position === 1 ? "" : "s"} ahead of this one`} · {d.queue_size} waiting in total. The queue takes one build from each student in turn, so nobody waits behind someone else&apos;s ten pushes.
@@ -315,36 +401,43 @@ export default function DeploymentDetail({ id, api }: { id: string; api: AppApi 
         </section>
       )}
 
-      {/* --- Logs ------------------------------------------------------------- */}
-      <section className="space-y-3">
-        <div className="flex items-center gap-3">
-          <div className="inline-flex rounded-full border border-[var(--hairline)] bg-[var(--surface)] p-1">
-            {(["build", "runtime"] as const).map((t) => (
-              <button key={t} onClick={() => setTab(t)} disabled={t === "runtime" && !d.container_name}
-                className={cx("rounded-full px-3.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-40",
-                  tab === t ? "bg-[var(--solid)] text-[var(--solid-text)]" : "text-[var(--text-muted)] hover:text-[var(--text)]")}>
-                {t === "build" ? "Build log" : "Runtime log"}
-              </button>
-            ))}
+      {/* --- Logs + timeline --------------------------------------------------
+          On wide screens the timeline sits beside the log at exactly its
+          height (absolutely filled, so a long timeline cannot stretch the
+          row) and scrolls inside itself. */}
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
+        <section className="min-w-0 space-y-3">
+          <div className="flex items-center gap-3">
+            <div className="inline-flex rounded-full border border-[var(--hairline)] bg-[var(--surface)] p-1">
+              {(["build", "runtime"] as const).map((t) => (
+                <button key={t} onClick={() => setTab(t)} disabled={t === "runtime" && !d.container_name}
+                  className={cx("rounded-full px-3.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-40",
+                    tab === t ? "bg-[var(--solid)] text-[var(--solid-text)]" : "text-[var(--text-muted)] hover:text-[var(--text)]")}>
+                  {t === "build" ? "Build log" : "Runtime log"}
+                </button>
+              ))}
+            </div>
+            <p className="truncate text-xs text-[var(--text-dim)]">
+              {tab === "build" ? "How the image was made — or why it could not be." : "What the running app printed — or printed as it died."}
+            </p>
           </div>
-          <p className="text-xs text-[var(--text-dim)]">
-            {tab === "build" ? "How the image was made — or why it could not be." : "What the running app printed — or printed as it died."}
-          </p>
-        </div>
-        {tab === "build" ? (
-          <LogViewer key={`b-${d.id}`} kind="build" streamPath={api.buildLogStream(d.id).replace(/\?offset=\d+$/, "")}
-            filename={`build-${d.id.slice(0, 8)}.log`} emptyText={d.status === "queued" ? "Waiting for a build slot…" : "No build output."} />
-        ) : (
-          <LogViewer key={`r-${d.id}`} kind="runtime" streamPath={d.container_name ? api.runtimeLogStream(d.id) : null}
-            filename={`runtime-${d.id.slice(0, 8)}.log`} emptyText="The app has not printed anything." />
-        )}
-      </section>
+          {tab === "build" ? (
+            <LogViewer key={`b-${d.id}`} kind="build" streamPath={api.buildLogStream(d.id).replace(/\?offset=\d+$/, "")}
+              filename={`build-${d.id.slice(0, 8)}.log`} emptyText={d.status === "queued" ? "Waiting for a build slot…" : "No build output."} />
+          ) : (
+            <LogViewer key={`r-${d.id}`} kind="runtime" streamPath={d.container_name ? api.runtimeLogStream(d.id) : null}
+              filename={`runtime-${d.id.slice(0, 8)}.log`} emptyText="The app has not printed anything." />
+          )}
+        </section>
 
-      {/* --- Timeline ---------------------------------------------------------- */}
-      <section>
-        <h2 className="mb-4 text-lg font-semibold">Timeline</h2>
-        <div className="plate p-5"><Timeline events={events} /></div>
-      </section>
+        <div className="relative min-w-0">
+          <Panel title="Timeline" icon={<HistoryIcon className="h-4 w-4" />}
+            hint={`${events.length} event${events.length === 1 ? "" : "s"}${isBusy(d.status) ? " · live" : ""}`}
+            className="max-xl:max-h-[28rem] xl:absolute xl:inset-0">
+            <Timeline events={events} />
+          </Panel>
+        </div>
+      </div>
 
       <ConfirmDialog open={confirmDelete} title="Delete this deployment?" confirmLabel="Delete" danger
         busy={pending === "delete"} onCancel={() => setConfirmDelete(false)}
@@ -355,5 +448,37 @@ export default function DeploymentDetail({ id, api }: { id: string; api: AppApi 
         Removes this build from the app&apos;s history and stops it if it is running. The app and its other deployments are untouched.
       </ConfirmDialog>
     </div>
+  );
+}
+
+/** The workflow run's steps, as GitHub reports them, with how long each took. */
+function CiSteps({ progress, live }: { progress: CiProgress; live: boolean }) {
+  return (
+    <ol className="mt-4 flex flex-wrap gap-1.5" aria-label="GitHub Actions steps">
+      {progress.steps.map((step) => {
+        const failed = step.conclusion === "failure" || step.conclusion === "cancelled";
+        const running = step.status === "in_progress";
+        const done = step.status === "completed" && !failed;
+        const skipped = step.conclusion === "skipped";
+        // Finished steps only: a running one shows a spinner, not a clock.
+        const seconds = step.started_at && step.completed_at
+          ? (new Date(step.completed_at).getTime() - new Date(step.started_at).getTime()) / 1000
+          : null;
+        return (
+          <li key={step.number} className={cx(
+            "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs",
+            failed ? "border-[var(--danger)]/30 bg-[var(--danger-soft)] text-[var(--danger)]"
+              : running ? "border-[var(--info)]/30 bg-[var(--info-soft)] text-[var(--info)]"
+              : done && !skipped ? "border-[var(--hairline)] text-[var(--text-muted)]"
+              : "border-[var(--hairline)] text-[var(--text-dim)]",
+          )}>
+            {failed ? <AlertIcon className="h-3 w-3" /> : running ? <Spinner className="h-3 w-3" /> : done && !skipped ? <CheckIcon className="h-3 w-3 text-[var(--ok)]" /> : <span className="h-1.5 w-1.5 rounded-full bg-[var(--surface-3)]" />}
+            {step.name}
+            {seconds != null && seconds >= 1 && !skipped && <span className="tabular text-[var(--text-dim)]">{Math.round(seconds)}s</span>}
+          </li>
+        );
+      })}
+      {live && progress.status === "queued" && <li className="text-xs text-[var(--text-dim)]">Waiting for a GitHub runner…</li>}
+    </ol>
   );
 }

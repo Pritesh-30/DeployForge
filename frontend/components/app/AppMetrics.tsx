@@ -90,7 +90,7 @@ export default function AppMetricsView() {
             <StatTile label="Memory avg / peak" value={bytes(s?.mem_avg)} hint={`peak ${bytes(s?.mem_max)}${memLimit ? ` of ${bytes(memLimit)}` : ""}`} />
           </div>
 
-          <div className="grid gap-4 lg:grid-cols-2">
+          <div className="grid gap-4 lg:grid-cols-2 [&>*]:h-[19rem]">
             <ChartPanel title="CPU" value={percent(data.latest?.cpu)} caption="% of one core">
               <TimeSeries domain={domain} series={[{ key: "cpu", label: "CPU", points: data.series.cpu }]}
                 format={(v, d) => `${v.toFixed(d ?? 1)}%`} />

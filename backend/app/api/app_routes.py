@@ -167,6 +167,13 @@ async def update_app(
 
     await db.commit()
     await db.refresh(repository)
+    if payload.auto_deploy is not None:
+        from app.services import webhook_sync
+
+        if repository.auto_deploy:
+            await webhook_sync.ensure_for(db, repository)
+        else:
+            await webhook_sync.remove_for(db, repository)
     grouped = await deployments_for(db, [repository.id])
     return app_out(repository, grouped.get(repository.id, []), detail=True)  # type: ignore[return-value]
 
@@ -204,6 +211,9 @@ async def delete_app(app_id: uuid.UUID, current_user: CurrentUser, db: DbSession
             logger.debug("Could not cancel queued build", exc_info=True)
         await runtime_service.destroy(db, deployment)
 
+    from app.services import webhook_sync
+
+    await webhook_sync.remove_for(db, repository)
     await db.delete(repository)
     await db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -211,9 +221,14 @@ async def delete_app(app_id: uuid.UUID, current_user: CurrentUser, db: DbSession
 
 @router.post("/{app_id}/redeploy", response_model=BuildStartedOut, status_code=status.HTTP_202_ACCEPTED)
 async def redeploy(
-    app_id: uuid.UUID, current_user: CurrentUser, db: DbSession, background_tasks: BackgroundTasks
+    app_id: uuid.UUID, current_user: CurrentUser, db: DbSession, background_tasks: BackgroundTasks,
+    fresh: bool = False,
 ) -> BuildStartedOut:
-    """Build the app again from the latest commit on its branch."""
+    """
+    Build the app again from the latest commit on its branch. If that commit
+    was already built with the same settings, its image is reused and the
+    build takes seconds; `fresh=true` builds it again anyway.
+    """
     if not current_user.can_deploy:
         raise AppError(
             current_user.deploy_block_reason
@@ -222,7 +237,7 @@ async def redeploy(
         )
     repository = await _owned_app(db, app_id, current_user.id)
     await deploy_limiter.check(current_user.id)
-    deployment = await trigger_build(db, repository, current_user, background_tasks=background_tasks)
+    deployment = await trigger_build(db, repository, current_user, background_tasks=background_tasks, fresh=fresh)
     return BuildStartedOut(
         deployment_id=deployment.id, status=deployment.status, target_label=repository.target_label
     )
@@ -244,6 +259,58 @@ async def promote(
     await deploy_limiter.check(current_user.id)
     await runtime_service.promote(db, deployment, repository, current_user)
     return deployment_out(deployment, repository)
+
+
+@router.get("/{app_id}/environment/status")
+async def environment_status(app_id: uuid.UUID, current_user: CurrentUser, db: DbSession) -> dict:
+    """
+    Whether the running app has the environment variables saved now, and if
+    not, what it takes: a restart (seconds) or a redeploy (a value is baked
+    into the build).
+    """
+    from app.services import environment_state
+
+    repository = await _owned_app(db, app_id, current_user.id)
+    live = await environment_state.live_deployment(db, repository.id)
+    env = await runtime_service.environment_for(db, repository.id)
+    return environment_state.state_for(live, env).to_dict()
+
+
+@router.post("/{app_id}/environment/apply")
+async def apply_environment(
+    app_id: uuid.UUID, current_user: CurrentUser, db: DbSession, background_tasks: BackgroundTasks,
+) -> dict:
+    """
+    Put the saved environment into effect the quickest correct way.
+
+    A variable the running container reads at start needs only a restart —
+    the container is recreated with the new values. One baked into the build
+    needs a redeploy, which goes live by itself when the build finishes.
+    """
+    from app.services import environment_state
+
+    repository = await _owned_app(db, app_id, current_user.id)
+    live = await environment_state.live_deployment(db, repository.id)
+    env = await runtime_service.environment_for(db, repository.id)
+    state = environment_state.state_for(live, env)
+
+    if state.state in ("not_running", "in_effect"):
+        return {"action": "none", **state.to_dict()}
+    if state.state == "rebuild":
+        if not current_user.can_deploy:
+            raise AppError(
+                current_user.deploy_block_reason
+                or "An administrator has revoked your permission to deploy.",
+                status_code=403,
+            )
+        await deploy_limiter.check(current_user.id)
+        deployment = await trigger_build(db, repository, current_user, background_tasks=background_tasks)
+        return {"action": "redeploying", "build_deployment_id": str(deployment.id), **state.to_dict()}
+
+    if live.status.is_busy:
+        raise ConflictError("The app is starting. Try again in a moment.")
+    await runtime_service.restart(db, live, repository, current_user)
+    return {"action": "restarted", **environment_state.state_for(live, env).to_dict()}
 
 
 @router.get("/{app_id}/activity", response_model=list[ActivityOut])

@@ -21,10 +21,12 @@ import { Button, cx } from "@/components/ui";
 
 /* --- Toasts ------------------------------------------------------------- */
 
-type Toast = { id: number; tone: "ok" | "danger" | "info"; text: string };
+type ToastAction = { label: string; onClick: () => void };
+type Toast = { id: number; tone: "ok" | "danger" | "info"; text: string; action?: ToastAction };
 
-export function toast(text: string, tone: Toast["tone"] = "ok") {
-  window.dispatchEvent(new CustomEvent("df-toast", { detail: { text, tone } }));
+/** Report an outcome. An `action` turns it into a one-click next step. */
+export function toast(text: string, tone: Toast["tone"] = "ok", action?: ToastAction) {
+  window.dispatchEvent(new CustomEvent("df-toast", { detail: { text, tone, action } }));
 }
 
 export function Toaster() {
@@ -32,10 +34,11 @@ export function Toaster() {
   useEffect(() => {
     let next = 1;
     function onToast(e: Event) {
-      const { text, tone } = (e as CustomEvent).detail as Omit<Toast, "id">;
+      const { text, tone, action } = (e as CustomEvent).detail as Omit<Toast, "id">;
       const id = next++;
-      setItems((list) => [...list.slice(-3), { id, text, tone }]);
-      setTimeout(() => setItems((list) => list.filter((t) => t.id !== id)), tone === "danger" ? 7000 : 4200);
+      setItems((list) => [...list.slice(-3), { id, text, tone, action }]);
+      // Long enough to read; longer still when there is something to click.
+      setTimeout(() => setItems((list) => list.filter((t) => t.id !== id)), action ? 10000 : tone === "danger" ? 7000 : 4200);
     }
     window.addEventListener("df-toast", onToast);
     return () => window.removeEventListener("df-toast", onToast);
@@ -52,9 +55,21 @@ export function Toaster() {
             t.tone === "danger" && "bg-[var(--danger-soft)] text-[var(--danger)]",
             t.tone === "info" && "bg-[var(--info-soft)] text-[var(--info)]",
           )}>
-            {t.tone === "danger" ? <AlertIcon className="h-3 w-3" /> : <CheckIcon className="h-3 w-3" />}
+            {t.tone === "ok" ? <CheckIcon className="h-3 w-3" /> : <AlertIcon className="h-3 w-3" />}
           </span>
-          <p className="leading-relaxed">{t.text}</p>
+          <div className="min-w-0 flex-1">
+            <p className="leading-relaxed">{t.text}</p>
+            {t.action && (
+              <button type="button"
+                onClick={() => {
+                  t.action?.onClick();
+                  setItems((list) => list.filter((x) => x.id !== t.id));
+                }}
+                className="mt-2 rounded-[var(--r-sm)] border border-[var(--hairline-strong)] px-2.5 py-1 text-xs font-medium transition-colors hover:bg-[var(--surface-2)]">
+                {t.action.label}
+              </button>
+            )}
+          </div>
         </div>
       ))}
     </div>

@@ -7,6 +7,7 @@
 "use client";
 
 import Link from "next/link";
+import { Checkbox, Select } from "@/components/Controls";
 import { useEffect, useMemo, useState } from "react";
 
 import { ChartPanel, TimeSeries } from "@/components/charts";
@@ -136,7 +137,7 @@ export default function InfrastructurePage() {
             ))}
           </div>
         </div>
-        <div className="grid gap-4 lg:grid-cols-2">
+        <div className="grid gap-4 lg:grid-cols-2 [&>*]:h-[17rem]">
           <ChartPanel title="CPU" value={percent(host?.latest?.cpu)} caption="share of the whole machine">
             <TimeSeries domain={[now - span, now]} series={[{ key: "cpu", label: "CPU", points: host?.series.cpu ?? [] }]}
               format={(v, d) => `${v.toFixed(d ?? 1)}%`} />
@@ -160,22 +161,26 @@ export default function InfrastructurePage() {
         <SectionTitle hint="Live. Containers that belong to an app link to it; platform containers are marked."
           action={
             <div className="flex items-center gap-2 text-xs">
-              <label className="inline-flex items-center gap-1.5 text-[var(--text-muted)]">
-                <input type="checkbox" checked={showPlatform} onChange={(e) => setShowPlatform(e.target.checked)} />
-                Platform containers
-              </label>
-              <select value={sort} onChange={(e) => setSort(e.target.value as Sort)}
-                className="rounded-full border border-[var(--hairline)] bg-[var(--surface)] px-3 py-1 outline-none">
-                <option value="cpu">By CPU</option>
-                <option value="mem">By memory</option>
-                <option value="name">By name</option>
-              </select>
+              <Checkbox checked={showPlatform} onChange={setShowPlatform}>Platform containers</Checkbox>
+              <Select<Sort>
+                ariaLabel="Sort containers"
+                variant="pill"
+                align="right"
+                menuClassName="w-40"
+                value={sort}
+                onChange={setSort}
+                options={[
+                  { value: "cpu", label: "By CPU" },
+                  { value: "mem", label: "By memory" },
+                  { value: "name", label: "By name" },
+                ]}
+              />
             </div>
           }>
           Containers
         </SectionTitle>
         {!containers ? <Skeleton className="h-64" /> : (
-          <div className="plate thin-scroll overflow-x-auto">
+          <div className="plate thin-scroll table-frame">
             <table className="w-full min-w-[56rem] text-sm">
               <thead>
                 <tr className="border-b border-[var(--hairline)] text-left text-[11px] uppercase tracking-[0.12em] text-[var(--text-dim)]">

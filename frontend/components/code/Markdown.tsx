@@ -5,12 +5,19 @@
  * as GitHub does: a link to `docs/setup.md` opens that file on GitHub, an
  * image `./screenshot.png` loads from the repository. Images in a private
  * repository need a GitHub login a third-party page does not have, so they
- * are left out rather than shown broken. Raw HTML is not rendered.
+ * are left out rather than shown broken.
+ *
+ * READMEs use HTML constantly — `<img width>`, `<p align="center">`,
+ * `<details>` — so it is rendered, but only after `rehype-sanitize` with its
+ * default schema, which is GitHub's own: the same tags and attributes GitHub
+ * allows, and no scripts, event handlers or `javascript:` URLs.
  */
 
 "use client";
 
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 
 /** `target` relative to the `base` directory, as a repository path. */
@@ -55,6 +62,8 @@ export default function Markdown({
     <div className="markdown-body">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        // Raw HTML is parsed, then sanitised — in that order, always.
+        rehypePlugins={[rehypeRaw, rehypeSanitize]}
         urlTransform={transform}
         components={{
           a: ({ href, children }) => {
@@ -69,10 +78,10 @@ export default function Markdown({
             }
             return <a href={link} target="_blank" rel="noreferrer">{children}</a>;
           },
-          img: ({ src, alt }) =>
+          img: ({ src, alt, width, height }) =>
             src ? (
               // eslint-disable-next-line @next/next/no-img-element -- repository images, arbitrary hosts
-              <img src={String(src)} alt={alt ?? ""} loading="lazy" />
+              <img src={String(src)} alt={alt ?? ""} width={width} height={height} loading="lazy" />
             ) : (
               <span className="text-[var(--text-dim)]">[{alt || "image"}]</span>
             ),

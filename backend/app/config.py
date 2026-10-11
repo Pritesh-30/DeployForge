@@ -149,6 +149,9 @@ class Settings(BaseSettings):
     app_pids_limit: int = 256
     # How long to wait for a started container to still be alive.
     app_start_grace_seconds: int = 6
+    # For this long after a new version goes live, a crash puts the previous
+    # version back automatically (app/runtime/guardian.py). 0 turns it off.
+    auto_rollback_window_seconds: int = 300
 
     # --- Quotas ---
     default_max_deployments: int = 3
@@ -158,6 +161,11 @@ class Settings(BaseSettings):
     # file and every build context — so they cannot live in a temp directory
     # that is deleted when the build finishes. Empty = beside the build logs.
     stacks_dir: str = ""
+
+    # --- GitHub webhooks (app/github/webhooks.py) ---
+    # Signs every delivery. With it set and an https PUBLIC_API_URL, each app
+    # gets a webhook and a push deploys it, whichever backend builds.
+    github_webhook_secret: str = ""
 
     # --- Redis ---
     # Holds the build queue, rate-limit state, metrics and cached GitHub
@@ -175,7 +183,12 @@ class Settings(BaseSettings):
     # How many builds run at once on this server. A build pins a CPU core and
     # a few GB of RAM; on one shared machine, more slots than the machine can
     # carry makes every build slower rather than more of them faster.
+    # This is the starting value; an administrator can change it from the
+    # queue page while the server runs, up to `build_concurrency_max`.
     build_concurrency: int = 2
+    # The most slots a worker will ever open. Each is an idle coroutine
+    # until the limit lets it take a job, so this costs nothing to raise.
+    build_concurrency_max: int = 8
     # Run the queue's workers inside the API process. Turn off when a separate
     # `python -m app.worker` process (or several) consumes the queue instead.
     worker_embedded: bool = True

@@ -7,6 +7,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { useLive } from "@/lib/live";
 
 import StatusBadge from "@/components/StatusBadge";
 import { ChevronRight, HistoryIcon, SearchIcon } from "@/components/Icons";
@@ -21,6 +22,10 @@ export default function DeploymentsPage() {
   const [rows, setRows] = useState<Deployment[] | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
+
+  // Re-read the moment the server reports a change (lib/live.ts).
+  const [liveTick, setLiveTick] = useState(0);
+  useLive(() => setLiveTick((n) => n + 1));
 
   useEffect(() => {
     let active = true;
@@ -40,7 +45,7 @@ export default function DeploymentsPage() {
       active = false;
       clearTimeout(timer);
     };
-  }, []);
+  }, [liveTick]);
 
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -83,7 +88,7 @@ export default function DeploymentsPage() {
           Each time an app is built, it shows up here.
         </EmptyState>
       ) : (
-        <div className="plate thin-scroll overflow-x-auto">
+        <div className="plate thin-scroll table-frame">
           <table className="w-full min-w-[48rem] text-sm">
             <thead>
               <tr className="border-b border-[var(--hairline)] text-left text-[11px] uppercase tracking-[0.12em] text-[var(--text-dim)]">

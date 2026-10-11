@@ -15,8 +15,8 @@ import { useApp } from "@/components/app/AppFrame";
 import { ActivityList } from "@/components/app/ActivityList";
 import { DeploymentRow } from "@/components/app/DeploymentRow";
 import { ChartPanel, Meter, Sparkline, StackedBars, StatTile } from "@/components/charts";
-import { ChevronRight, CpuIcon, GlobeIcon, HistoryIcon, PulseIcon } from "@/components/Icons";
-import { Mono, SectionTitle, Skeleton, cx, relativeTime } from "@/components/ui";
+import { ChevronRight, CpuIcon, GlobeIcon, HistoryIcon, PulseIcon, UndoIcon } from "@/components/Icons";
+import { Mono, Panel, PanelEmpty, Skeleton, cx, relativeTime } from "@/components/ui";
 import { appIsBusy, type Activity, type AppMetrics } from "@/lib/apps";
 import { bytes, ms, percent, seconds, share } from "@/lib/format";
 import { isRunning } from "@/lib/deployments";
@@ -82,38 +82,35 @@ export default function AppOverview() {
         </div>
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-[1.35fr_1fr]">
-        {/* --- Production ----------------------------------------------------- */}
-        <div className="plate p-6">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <p className="text-[13px] font-medium text-[var(--text-muted)]">
-                {live ? "Production deployment" : "Latest deployment"}
-              </p>
-              <p className="mt-1 text-xs text-[var(--text-dim)]">
-                {app.current ? `Created ${relativeTime(app.current.created_at)}` : "This app has never been built."}
-              </p>
-            </div>
-            {app.current && (
-              <Link href={api.deploymentHref(app.current.id)}
-                className="inline-flex items-center gap-1 text-xs font-medium text-[var(--text-muted)] transition-colors hover:text-[var(--text)]">
-                Details <ChevronRight className="h-3.5 w-3.5" />
-              </Link>
-            )}
-          </div>
-
+      {/* Two rows of fixed height: side-by-side panels always line up, and
+          whichever holds more scrolls inside itself. */}
+      <div className="grid gap-4 lg:h-[25rem] lg:grid-cols-[1.35fr_1fr]">
+        <Panel
+          title={live ? "Production deployment" : "Latest deployment"}
+          hint={app.current ? `Created ${relativeTime(app.current.created_at)}` : "This app has never been built."}
+          action={app.current && (
+            <Link href={api.deploymentHref(app.current.id)}
+              className="inline-flex items-center gap-1 font-medium text-[var(--text-muted)] transition-colors hover:text-[var(--text)]">
+              Details <ChevronRight className="h-3.5 w-3.5" />
+            </Link>
+          )}
+          footer={app.current?.url ? <span className="font-[family-name:var(--font-jetbrains-mono)]">{app.current.url.replace(/^https?:\/\//, "")}</span> : undefined}
+        >
           {app.current ? (
-            <dl className="mt-5 grid gap-x-6 gap-y-4 sm:grid-cols-2">
+            <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
               <Fact label="Status" value={app.current.status} />
               <Fact label="Commit" value={<Mono>{app.current.commit_sha?.slice(0, 12) ?? "—"}</Mono>} />
               <Fact label="Built with" value={app.current.build_method ?? "—"} />
-              <Fact label="Build time" value={seconds(
-                app.current.build_started_at && app.current.build_finished_at
-                  ? (new Date(app.current.build_finished_at).getTime() - new Date(app.current.build_started_at).getTime()) / 1000
-                  : null,
-              )} />
+              <Fact label="Build time" value={<>
+                {seconds(
+                  app.current.build_started_at && app.current.build_finished_at
+                    ? (new Date(app.current.build_finished_at).getTime() - new Date(app.current.build_started_at).getTime()) / 1000
+                    : null,
+                )}
+                {app.current.reused_from_id && <span className="text-[var(--info)]"> · image reused</span>}
+              </>} />
               <Fact label="Listens on" value={app.current.app_port ? `port ${app.current.app_port}` : "—"} />
-              <Fact label="Trigger" value={app.current.ci_trigger === "push" ? "Push to GitHub" : app.current.ci_trigger === "dashboard" ? "Deploy button" : "Deploy button"} />
+              <Fact label="Trigger" value={app.current.ci_trigger === "push" ? "Push to GitHub" : "Deploy button"} />
               <div className="sm:col-span-2">
                 <Fact label="Image" value={<Mono className="break-all">{app.current.image_ref ?? (app.current.compose_project ? `compose stack ${app.current.compose_project}` : "—")}</Mono>} />
               </div>
@@ -141,16 +138,19 @@ export default function AppOverview() {
               )}
             </dl>
           ) : (
-            <p className="mt-6 text-sm text-[var(--text-muted)]">Press Redeploy to build it for the first time.</p>
+            <PanelEmpty title="Not built yet">Press Redeploy to build it for the first time.</PanelEmpty>
           )}
-        </div>
+        </Panel>
 
-        {/* --- Build health ---------------------------------------------------- */}
         <ChartPanel
           title="Builds · last 14 days"
           value={windowTotal}
           caption={<>{windowTotal ? `${share(windowOk / windowTotal)} succeeded` : "none in this window"}<br />
             {s.success_rate == null ? "" : `${share(s.success_rate)} of all ${s.builds}`}</>}
+          footer={<>
+            <span>Median build {seconds(s.build_seconds_median)} · last {seconds(s.build_seconds_last)}</span>
+            {s.build_seconds_trend.length > 1 && <Sparkline points={s.build_seconds_trend} label="recent build durations" />}
+          </>}
         >
           <StackedBars
             days={s.daily.map((d) => d.date)}
@@ -158,45 +158,55 @@ export default function AppOverview() {
               { key: "ok", label: "Succeeded", color: "var(--ok)", values: s.daily.map((d) => d.succeeded) },
               { key: "failed", label: "Failed", color: "var(--danger)", values: s.daily.map((d) => d.failed) },
             ]}
-            height={150}
           />
-          <div className="mt-4 flex items-center justify-between border-t border-[var(--hairline)] pt-4 text-xs text-[var(--text-dim)]">
-            <span>Median build {seconds(s.build_seconds_median)} · last {seconds(s.build_seconds_last)}</span>
-            {s.build_seconds_trend.length > 1 && <Sparkline points={s.build_seconds_trend} label="recent build durations" />}
-          </div>
         </ChartPanel>
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-[1.35fr_1fr]">
-        <section>
-          <SectionTitle
-            hint="Each build of this app. Roll back to any that built successfully — it runs that exact image again."
-            action={
-              <Link href={`${api.base}/${app.id}/deployments`} className="text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text)]">
-                All {app.deployment_count} →
-              </Link>
-            }
-          >
-            Recent deployments
-          </SectionTitle>
+      <div className="grid gap-4 lg:h-[26rem] lg:grid-cols-[1.35fr_1fr]">
+        <Panel
+          title="Recent deployments"
+          hint="Roll back to any that built successfully — it runs that exact image again."
+          action={
+            <Link href={`${api.base}/${app.id}/deployments`} className="font-medium text-[var(--text-muted)] hover:text-[var(--text)]">
+              All {app.deployment_count} →
+            </Link>
+          }
+          flush
+          bodyClassName="flex flex-col"
+        >
           {app.deployments.length === 0 ? (
-            <p className="text-sm text-[var(--text-dim)]">No deployments yet.</p>
+            <PanelEmpty icon={<HistoryIcon className="h-6 w-6" />} title="No deployments yet">
+              Each build becomes a version you can return to.
+            </PanelEmpty>
           ) : (
-            <div className="plate divide-y divide-[var(--hairline)] overflow-hidden">
-              {app.deployments.slice(0, 5).map((d) => (
-                <DeploymentRow key={d.id} deployment={d} isCurrent={d.id === app.current?.id} compact />
-              ))}
-            </div>
+            <>
+              <div className="divide-y divide-[var(--hairline)] border-b border-[var(--hairline)]">
+                {app.deployments.slice(0, 12).map((d) => (
+                  <DeploymentRow key={d.id} deployment={d} isCurrent={d.id === app.current?.id} compact />
+                ))}
+              </div>
+              {/* A short history leaves room: use it to say how history grows,
+                  rather than leaving a hole beside a full activity feed. */}
+              {app.deployments.length < 4 && (
+                <PanelEmpty grow icon={<UndoIcon className="h-5 w-5" />} title="Every deploy is a version you can return to">
+                  {api.mode === "owner"
+                    ? "Redeploy or push a commit and it appears here. A broken release is one click from the version before it — no rebuild."
+                    : "Each build the owner makes appears here, and any that built can be restored in one click."}
+                </PanelEmpty>
+              )}
+            </>
           )}
-        </section>
+        </Panel>
 
-        <section>
-          <SectionTitle hint={appIsBusy(app) ? "Updating live." : undefined}
-            action={<Link href={`${api.base}/${app.id}/activity`} className="text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text)]">All →</Link>}>
-            <span className="inline-flex items-center gap-2"><HistoryIcon className="h-4 w-4 text-[var(--text-dim)]" />Activity</span>
-          </SectionTitle>
-          {activity === null ? <Skeleton className="h-48" /> : <ActivityList items={activity.slice(0, 8)} showApp={false} />}
-        </section>
+        <Panel
+          title="Activity"
+          icon={<HistoryIcon className="h-4 w-4" />}
+          hint={appIsBusy(app) ? "Updating live." : "Everything that happened to this app."}
+          action={<Link href={`${api.base}/${app.id}/activity`} className="font-medium text-[var(--text-muted)] hover:text-[var(--text)]">All →</Link>}
+          flush
+        >
+          {activity === null ? <div className="p-5"><Skeleton className="h-40" /></div> : <ActivityList items={activity.slice(0, 30)} showApp={false} flush />}
+        </Panel>
       </div>
     </div>
   );

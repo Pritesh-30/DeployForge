@@ -10,7 +10,9 @@
 "use client";
 
 import Link from "next/link";
+import { Select } from "@/components/Controls";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useLive } from "@/lib/live";
 
 import { Sparkline } from "@/components/charts";
 import { toast } from "@/components/Feedback";
@@ -53,6 +55,8 @@ export default function AppsTable({
       return [];
     }
   }, [load]);
+
+  useLive(() => void refresh());
 
   useEffect(() => {
     let active = true;
@@ -154,16 +158,25 @@ export default function AppsTable({
             </button>
           ))}
         </div>
-        <select value={sort} onChange={(e) => setSort(e.target.value as Sort)} disabled={!!query.trim()}
-          className="ml-auto rounded-full border border-[var(--hairline)] bg-[var(--surface)] px-3 py-1.5 text-xs outline-none disabled:opacity-50">
-          <option value="recent">Recently deployed</option>
-          <option value="name">Name</option>
-          <option value="cpu">CPU now</option>
-          <option value="memory">Memory now</option>
-        </select>
+        <Select<Sort>
+          ariaLabel="Sort apps"
+          variant="pill"
+          align="right"
+          className="ml-auto"
+          menuClassName="w-48"
+          value={sort}
+          onChange={setSort}
+          disabled={!!query.trim()}
+          options={[
+            { value: "recent", label: "Recently deployed" },
+            { value: "name", label: "Name" },
+            { value: "cpu", label: "CPU now" },
+            { value: "memory", label: "Memory now" },
+          ]}
+        />
       </div>
 
-      <div className="plate thin-scroll overflow-x-auto">
+      <div className="plate thin-scroll table-frame">
         <table className="w-full min-w-[56rem] text-sm">
           <thead>
             <tr className="border-b border-[var(--hairline)] text-left text-[11px] uppercase tracking-[0.12em] text-[var(--text-dim)]">

@@ -40,6 +40,8 @@ class DeploymentOut(BaseModel):
     # whether a push or the dashboard started it.
     ci_run_url: str | None = None
     ci_trigger: str | None = None
+    # The deployment whose image this one reused instead of building.
+    reused_from_id: uuid.UUID | None = None
 
     # --- runtime ---
     url: str | None = None
