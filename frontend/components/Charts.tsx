@@ -1,170 +1,545 @@
 /**
- * Small inline charts for the admin overview.
+ * Charts, hand-built in SVG.
  *
- * Hand-drawn SVG rather than a charting library: there are three shapes, they
- * need to inherit the theme's tokens, and a 90 KB dependency to draw fourteen
- * rectangles would be a poor trade. Each one degrades to a readable empty
- * state, because an admin opening a fresh platform sees no data at all.
+ * The rules they follow (and why) are the data-visualisation spec this
+ * product uses: thin marks — 2px lines, 10% area washes, bars no thicker than
+ * 24px with a 4px rounded end — hairline grids that stay out of the way, one
+ * y-axis only, a legend whenever there are two series, text in text colours
+ * rather than series colours, and a hover readout that lists every series at
+ * the pointer rather than making anyone aim at a line.
+ *
+ * Series colours come from --series-1..5, a palette validated for colour
+ * vision deficiency against this product's surface. Status colours (ok,
+ * danger) are used only where the data *is* a status — builds that
+ * succeeded or failed — and always with a label beside them.
  */
 
 "use client";
 
-import { ReactNode } from "react";
+import { ReactNode, useEffect, useId, useRef, useState } from "react";
 
-import { Card, cx } from "@/components/ui";
+import { cx } from "@/components/ui";
 
-/* --- Bars over time ----------------------------------------------------- */
+export type Point = [number, number];
 
-/**
- * Fill in the days that have no deployments.
- *
- * The API only returns days something happened on. Plotting those alone would
- * stretch a single busy day across the whole chart and imply a fortnight of
- * activity, so the missing days are added back as zeroes and the axis means
- * what it says.
- */
-function overDays(
-  data: { date: string; count: number }[],
-  days: number,
-): { date: string; count: number }[] {
-  const counts = new Map(data.map((d) => [d.date, d.count]));
-  const series: { date: string; count: number }[] = [];
+export const SERIES = ["var(--series-1)", "var(--series-2)", "var(--series-3)", "var(--series-4)", "var(--series-5)"];
 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+/* --- Sizing ------------------------------------------------------------- */
 
-  for (let i = days - 1; i >= 0; i--) {
-    const day = new Date(today);
-    day.setDate(today.getDate() - i);
-    // Local calendar date, matching the dates the API returns.
-    const key = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
-    series.push({ date: key, count: counts.get(key) ?? 0 });
-  }
-  return series;
+/** The element's width, kept current as the layout changes. */
+function useWidth<T extends HTMLElement>(): [React.RefObject<T | null>, number] {
+  const ref = useRef<T | null>(null);
+  const [width, setWidth] = useState(0);
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    const observer = new ResizeObserver(([entry]) => setWidth(Math.round(entry.contentRect.width)));
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+  return [ref, width];
 }
 
-export function BarSeries({
-  data,
-  label,
-  days = 14,
+/* --- Scales ------------------------------------------------------------- */
+
+/** Round tick values: 0, 25, 50, 75, 100 rather than 0, 23.7, 47.4 ... */
+export function niceTicks(max: number, count = 4, integer = false): number[] {
+  if (!Number.isFinite(max) || max <= 0) return [0, 1];
+  const raw = max / count;
+  const magnitude = 10 ** Math.floor(Math.log10(raw));
+  let step = [1, 2, 2.5, 5, 10].map((m) => m * magnitude).find((s) => s >= raw) ?? raw;
+  // Counts are whole: half a build is not a tick anyone needs.
+  if (integer) step = Math.max(1, Math.ceil(step));
+  const ticks: number[] = [];
+  for (let v = 0; v <= max + step * 0.001; v += step) ticks.push(Number(v.toPrecision(12)));
+  if (ticks[ticks.length - 1] < max) ticks.push(Number((ticks[ticks.length - 1] + step).toPrecision(12)));
+  return ticks;
+}
+
+/**
+ * Split a series where samples stop. If an app was down for ten minutes, a
+ * line drawn straight across the gap would claim values nobody measured.
+ */
+function segments(points: Point[], gapMs: number): Point[][] {
+  const out: Point[][] = [];
+  let current: Point[] = [];
+  for (let i = 0; i < points.length; i++) {
+    if (i > 0 && points[i][0] - points[i - 1][0] > gapMs) {
+      if (current.length) out.push(current);
+      current = [];
+    }
+    current.push(points[i]);
+  }
+  if (current.length) out.push(current);
+  return out;
+}
+
+function medianStep(points: Point[]): number {
+  if (points.length < 2) return 60_000;
+  const steps = points.slice(1).map((p, i) => p[0] - points[i][0]).sort((a, b) => a - b);
+  return steps[Math.floor(steps.length / 2)] || 60_000;
+}
+
+/* --- Time series -------------------------------------------------------- */
+
+export type Series = { key: string; label: string; points: Point[]; color?: string };
+
+export function TimeSeries({
+  series,
+  format,
+  height = 200,
+  domain,
+  yMax,
+  integer = false,
+  area = true,
+  empty = "No samples in this window yet.",
 }: {
-  data: { date: string; count: number }[];
-  label: string;
-  days?: number;
+  series: Series[];
+  /**
+   * Formats a value for the axis and the readout. On the axis it is given the
+   * number of decimals the tick spacing needs, so ticks 0.25 apart do not all
+   * read "0%"; in the readout it is not, and picks its own.
+   */
+  format: (value: number, decimals?: number) => string;
+  height?: number;
+  /** The time window shown, [start, end] in ms — so an hour reads as an hour. */
+  domain?: [number, number];
+  /** Fix the top of the scale, e.g. 100 for a percentage of a limit. */
+  yMax?: number;
+  /** Whole-number ticks, for counts. */
+  integer?: boolean;
+  area?: boolean;
+  empty?: ReactNode;
 }) {
-  if (data.length === 0) {
-    return (
-      <p className="flex h-32 items-center justify-center text-sm text-[var(--text-dim)]">
-        No deployments yet.
-      </p>
-    );
+  const [ref, width] = useWidth<HTMLDivElement>();
+  const gradientId = useId();
+  const [hover, setHover] = useState<number | null>(null);
+
+  const colored = series.map((s, i) => ({ ...s, color: s.color ?? SERIES[i] }));
+  const all = colored.flatMap((s) => s.points);
+  const hasData = all.length > 0;
+
+  const pad = { top: 12, right: 12, bottom: 24, left: 52 };
+  const innerW = Math.max(0, width - pad.left - pad.right);
+  const innerH = height - pad.top - pad.bottom;
+
+  // The window shown: the one asked for, else the data's own extent. An
+  // empty chart has no time axis to draw, so its extent does not matter.
+  const xs = all.map((p) => p[0]);
+  const [x0, x1]: [number, number] = domain ?? (hasData ? [Math.min(...xs), Math.max(...xs)] : [0, 1]);
+
+  const peak = Math.max(yMax ?? 0, ...all.map((p) => p[1]), 0);
+  const ticks = niceTicks(peak || 1, 4, integer);
+  const top = ticks[ticks.length - 1];
+  const step = ticks.length > 1 ? ticks[1] - ticks[0] : 1;
+  const decimals = step >= 1 ? 0 : Math.min(3, Math.ceil(-Math.log10(step) - 1e-9));
+
+  const sx = (t: number) => pad.left + (x1 === x0 ? innerW : ((t - x0) / (x1 - x0)) * innerW);
+  const sy = (v: number) => pad.top + innerH - (v / top) * innerH;
+
+  // The readout snaps to the nearest sampled time of the first series that
+  // has data; every series is then read at its own nearest point.
+  const anchor = colored.find((s) => s.points.length)?.points ?? [];
+
+  function nearest(points: Point[], t: number): Point | null {
+    if (!points.length) return null;
+    let lo = 0;
+    let hi = points.length - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (points[mid][0] < t) lo = mid;
+      else hi = mid;
+    }
+    return Math.abs(points[lo][0] - t) <= Math.abs(points[hi][0] - t) ? points[lo] : points[hi];
   }
 
-  const series = overDays(data, days);
-  const max = Math.max(...series.map((d) => d.count), 1);
+  function onMove(e: React.PointerEvent<SVGSVGElement>) {
+    if (!anchor.length) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const t = x0 + ((e.clientX - rect.left - pad.left) / innerW) * (x1 - x0);
+    const p = nearest(anchor, t);
+    setHover(p ? anchor.indexOf(p) : null);
+  }
+
+  function onKey(e: React.KeyboardEvent) {
+    if (!anchor.length) return;
+    if (e.key === "ArrowRight") setHover((h) => Math.min(anchor.length - 1, (h ?? -1) + 1));
+    else if (e.key === "ArrowLeft") setHover((h) => Math.max(0, (h ?? anchor.length) - 1));
+    else if (e.key === "Escape") setHover(null);
+    else return;
+    e.preventDefault();
+  }
+
+  const tickCount = width < 420 ? 3 : 5;
+  const xTicks = hasData || domain
+    ? Array.from({ length: tickCount }, (_, i) => x0 + ((x1 - x0) * i) / (tickCount - 1))
+    : [];
+
+  const spanHours = (x1 - x0) / 3_600_000;
+  const timeLabel = (t: number) =>
+    new Date(t).toLocaleTimeString([], spanHours > 20 ? { hour: "2-digit", minute: "2-digit" } : { hour: "2-digit", minute: "2-digit" });
+
+  const hoverT = hover != null ? anchor[hover]?.[0] : null;
+  const readout =
+    hoverT != null
+      ? colored.map((s) => ({ ...s, value: nearest(s.points, hoverT)?.[1] ?? null }))
+      : null;
 
   return (
-    <div>
-      <div className="flex h-32 items-end gap-1.5" role="img" aria-label={label}>
-        {series.map((point) => {
-          const height = Math.max((point.count / max) * 100, 4);
-          return (
-            <div
-              key={point.date}
-              // `h-full` matters: the bar's height is a percentage, and a
-              // percentage of an auto-height parent is zero — the chart would
-              // render as an empty strip.
-              className="group relative flex h-full flex-1 items-end"
-              title={`${point.date}: ${point.count}`}
-            >
-              <div
-                className={cx(
-                  "w-full rounded-t-sm transition-opacity group-hover:opacity-80",
-                  point.count > 0
-                    ? "bg-[var(--accent)]"
-                    : "bg-[var(--surface-3)]",
-                )}
-                style={{ height: `${height}%` }}
-              />
-              {/* The exact value on hover, so the axis can stay off. */}
-              <span className="pointer-events-none absolute -top-6 left-1/2 hidden -translate-x-1/2 rounded bg-[var(--surface-3)] px-1.5 py-0.5 text-[11px] text-[var(--text)] group-hover:block">
-                {point.count}
+    <div ref={ref} className="relative w-full" style={{ height }}>
+      {colored.length > 1 && (
+        <div className="absolute right-0 top-[-1.75rem] flex gap-3 text-[11px] text-[var(--text-muted)]">
+          {colored.map((s) => (
+            <span key={s.key} className="inline-flex items-center gap-1.5">
+              <span className="h-[2px] w-3 rounded-full" style={{ background: s.color }} />
+              {s.label}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {width > 0 && (
+        <svg
+          width={width}
+          height={height}
+          role="img"
+          aria-label={colored.map((s) => s.label).join(", ")}
+          tabIndex={hasData ? 0 : -1}
+          onPointerMove={onMove}
+          onPointerLeave={() => setHover(null)}
+          onKeyDown={onKey}
+          onBlur={() => setHover(null)}
+          className="block outline-none focus-visible:ring-1 focus-visible:ring-[var(--accent-line)] rounded-[var(--r-xs)]"
+        >
+          <defs>
+            {colored.map((s, i) => (
+              <linearGradient key={s.key} id={`${gradientId}-${i}`} x1="0" x2="0" y1="0" y2="1">
+                <stop offset="0%" stopColor={s.color} stopOpacity={0.16} />
+                <stop offset="100%" stopColor={s.color} stopOpacity={0.02} />
+              </linearGradient>
+            ))}
+          </defs>
+
+          {ticks.map((t) => (
+            <g key={t}>
+              <line x1={pad.left} x2={width - pad.right} y1={sy(t)} y2={sy(t)}
+                stroke={t === 0 ? "var(--chart-axis)" : "var(--chart-grid)"} strokeWidth={1} />
+              <text x={pad.left - 8} y={sy(t)} dy="0.32em" textAnchor="end"
+                className="tabular" fontSize={10.5} fill="var(--chart-ink)">
+                {format(t, decimals)}
+              </text>
+            </g>
+          ))}
+
+          {xTicks.map((t, i) => (
+            <text key={i} x={sx(t)} y={height - 6}
+              textAnchor={i === 0 ? "start" : i === xTicks.length - 1 ? "end" : "middle"}
+              className="tabular" fontSize={10.5} fill="var(--chart-ink)">
+              {timeLabel(t)}
+            </text>
+          ))}
+
+          {colored.map((s, i) => {
+            const parts = segments(s.points, medianStep(s.points) * 3.5);
+            return (
+              <g key={s.key}>
+                {parts.map((part, j) => {
+                  if (part.length === 1) {
+                    return <circle key={j} cx={sx(part[0][0])} cy={sy(part[0][1])} r={2} fill={s.color} />;
+                  }
+                  const line = part.map((p, k) => `${k ? "L" : "M"}${sx(p[0]).toFixed(1)},${sy(p[1]).toFixed(1)}`).join("");
+                  const fill = `${line}L${sx(part[part.length - 1][0]).toFixed(1)},${sy(0)}L${sx(part[0][0]).toFixed(1)},${sy(0)}Z`;
+                  return (
+                    <g key={j}>
+                      {area && i === 0 && <path d={fill} fill={`url(#${gradientId}-${i})`} />}
+                      <path d={line} fill="none" stroke={s.color} strokeWidth={2}
+                        strokeLinejoin="round" strokeLinecap="round" />
+                    </g>
+                  );
+                })}
+              </g>
+            );
+          })}
+
+          {hoverT != null && (
+            <g pointerEvents="none">
+              <line x1={sx(hoverT)} x2={sx(hoverT)} y1={pad.top} y2={pad.top + innerH}
+                stroke="var(--chart-axis)" strokeWidth={1} />
+              {readout?.map((r) =>
+                r.value == null ? null : (
+                  <circle key={r.key} cx={sx(hoverT)} cy={sy(r.value)} r={4}
+                    fill={r.color} stroke="var(--surface)" strokeWidth={2} />
+                ),
+              )}
+            </g>
+          )}
+
+          {!hasData && (
+            <text x={width / 2} y={pad.top + innerH / 2} textAnchor="middle" fontSize={12} fill="var(--text-dim)">
+              {typeof empty === "string" ? empty : ""}
+            </text>
+          )}
+        </svg>
+      )}
+
+      {hoverT != null && readout && (
+        <div
+          className="pointer-events-none absolute top-1 z-10 min-w-[8.5rem] rounded-[var(--r-xs)] border border-[var(--hairline-strong)] bg-[var(--surface-3)] px-3 py-2 shadow-[var(--shadow)]"
+          style={{
+            left: Math.min(Math.max(sx(hoverT) + 12, 0), Math.max(0, width - 150)),
+          }}
+        >
+          <p className="tabular text-[10.5px] text-[var(--text-dim)]">
+            {new Date(hoverT).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+          </p>
+          {readout.map((r) => (
+            <div key={r.key} className="mt-1 flex items-center justify-between gap-4">
+              <span className="inline-flex items-center gap-1.5 text-[11px] text-[var(--text-muted)]">
+                <span className="h-[2px] w-2.5 rounded-full" style={{ background: r.color }} />
+                {r.label}
+              </span>
+              <span className="tabular text-[12px] font-semibold text-[var(--text)]">
+                {r.value == null ? "—" : format(r.value)}
               </span>
             </div>
-          );
-        })}
-      </div>
-      <div className="mt-2 flex justify-between text-[11px] text-[var(--text-dim)]">
-        <span>{formatDay(series[0].date)}</span>
-        <span>{formatDay(series[series.length - 1].date)}</span>
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-function formatDay(iso: string): string {
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime())
-    ? iso
-    : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+/* --- Sparkline ---------------------------------------------------------- */
+
+/**
+ * A trend at a glance: the line in a quiet tone, the latest value marked in
+ * the accent — the shape is context, the end is the news.
+ */
+export function Sparkline({
+  points,
+  width = 96,
+  height = 28,
+  max,
+  label,
+}: {
+  points: Point[] | number[];
+  width?: number;
+  height?: number;
+  max?: number;
+  label?: string;
+}) {
+  const data: Point[] = (points as (Point | number)[]).map((p, i) =>
+    Array.isArray(p) ? (p as Point) : ([i, p] as Point),
+  );
+  if (data.length < 2) {
+    return (
+      <svg width={width} height={height} aria-hidden>
+        <line x1={0} x2={width} y1={height - 2} y2={height - 2} stroke="var(--chart-grid)" />
+      </svg>
+    );
+  }
+  const xs = data.map((p) => p[0]);
+  const lo = Math.min(...xs);
+  const hi = Math.max(...xs);
+  const top = Math.max(max ?? 0, ...data.map((p) => p[1])) || 1;
+  const px = (t: number) => 2 + ((t - lo) / (hi - lo || 1)) * (width - 6);
+  const py = (v: number) => height - 3 - (v / top) * (height - 6);
+  const d = data.map((p, i) => `${i ? "L" : "M"}${px(p[0]).toFixed(1)},${py(p[1]).toFixed(1)}`).join("");
+  const last = data[data.length - 1];
+  return (
+    <svg width={width} height={height} role="img" aria-label={label ?? "trend"}>
+      <path d={d} fill="none" stroke="var(--text-dim)" strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" />
+      <circle cx={px(last[0])} cy={py(last[1])} r={2.5} fill="var(--accent)" />
+    </svg>
+  );
 }
 
-/* --- Proportional breakdown --------------------------------------------- */
+/* --- Stacked daily bars ------------------------------------------------- */
 
-const SERIES_COLORS = [
-  "var(--accent)",
-  "var(--info)",
-  "var(--ok)",
-  "var(--warn)",
-  "var(--danger)",
-  "var(--text-dim)",
-];
+export type Stack = { label: string; values: number[] };
 
-export function Breakdown({
-  data,
-  empty = "Nothing recorded yet.",
+/**
+ * Columns per day, each split into parts — e.g. builds that succeeded and
+ * builds that failed. Parts are separated by a 2px surface gap, not a
+ * stroke; the top part has the rounded end.
+ */
+export function StackedBars({
+  days,
+  parts,
+  height = 160,
 }: {
-  data: Record<string, number>;
-  empty?: string;
+  days: string[];
+  parts: { key: string; label: string; color: string; values: number[] }[];
+  height?: number;
 }) {
-  const entries = Object.entries(data)
-    .filter(([, n]) => n > 0)
-    .sort((a, b) => b[1] - a[1]);
-  const total = entries.reduce((sum, [, n]) => sum + n, 0);
+  const [ref, width] = useWidth<HTMLDivElement>();
+  const [hover, setHover] = useState<number | null>(null);
+  const totals = days.map((_, i) => parts.reduce((sum, p) => sum + (p.values[i] ?? 0), 0));
+  const ticks = niceTicks(Math.max(1, ...totals), 3, true);
+  const top = ticks[ticks.length - 1];
 
-  if (total === 0) {
-    return <p className="py-6 text-center text-sm text-[var(--text-dim)]">{empty}</p>;
-  }
+  const pad = { top: 8, right: 4, bottom: 22, left: 28 };
+  const innerW = Math.max(0, width - pad.left - pad.right);
+  const innerH = height - pad.top - pad.bottom;
+  const slot = days.length ? innerW / days.length : 0;
+  const barW = Math.min(24, Math.max(4, slot * 0.6));
+  const sy = (v: number) => pad.top + innerH - (v / top) * innerH;
 
   return (
-    <div>
-      {/* One stacked bar, so proportion is visible before any label is read. */}
-      <div className="flex h-2.5 overflow-hidden rounded-full bg-[var(--surface-3)]">
-        {entries.map(([key, n], i) => (
-          <div
-            key={key}
-            style={{
-              width: `${(n / total) * 100}%`,
-              background: SERIES_COLORS[i % SERIES_COLORS.length],
-            }}
-            title={`${key}: ${n}`}
-          />
+    <div ref={ref} className="relative w-full" style={{ height }}>
+      <div className="absolute right-0 top-[-1.75rem] flex gap-3 text-[11px] text-[var(--text-muted)]">
+        {parts.map((p) => (
+          <span key={p.key} className="inline-flex items-center gap-1.5">
+            <span className="h-2 w-2 rounded-[2px]" style={{ background: p.color }} />
+            {p.label}
+          </span>
         ))}
       </div>
-      <ul className="mt-3 space-y-1.5">
-        {entries.map(([key, n], i) => (
-          <li key={key} className="flex items-center gap-2 text-sm">
-            <span
-              className="h-2.5 w-2.5 shrink-0 rounded-sm"
-              style={{ background: SERIES_COLORS[i % SERIES_COLORS.length] }}
-            />
-            <span className="flex-1 truncate capitalize text-[var(--text-muted)]">
-              {key}
-            </span>
-            <span className="tabular font-medium">{n}</span>
-            <span className="tabular w-10 text-right text-xs text-[var(--text-dim)]">
-              {Math.round((n / total) * 100)}%
-            </span>
+      {width > 0 && (
+        <svg width={width} height={height} role="img" aria-label={parts.map((p) => p.label).join(" and ") + " per day"}>
+          {ticks.map((t) => (
+            <g key={t}>
+              <line x1={pad.left} x2={width - pad.right} y1={sy(t)} y2={sy(t)}
+                stroke={t === 0 ? "var(--chart-axis)" : "var(--chart-grid)"} />
+              <text x={pad.left - 6} y={sy(t)} dy="0.32em" textAnchor="end" fontSize={10.5}
+                className="tabular" fill="var(--chart-ink)">{t}</text>
+            </g>
+          ))}
+          {days.map((day, i) => {
+            const cx = pad.left + slot * i + slot / 2;
+            let base = 0;
+            const drawn = parts
+              .map((p) => ({ ...p, v: p.values[i] ?? 0 }))
+              .filter((p) => p.v > 0);
+            return (
+              <g key={day}
+                tabIndex={0}
+                onPointerEnter={() => setHover(i)}
+                onPointerLeave={() => setHover(null)}
+                onFocus={() => setHover(i)}
+                onBlur={() => setHover(null)}
+                className="outline-none"
+              >
+                {/* The hit area is the whole slot, not just the painted bar. */}
+                <rect x={pad.left + slot * i} y={pad.top} width={slot} height={innerH} fill="transparent" />
+                {drawn.map((p, j) => {
+                  const y0 = sy(base);
+                  const y1 = sy(base + p.v);
+                  base += p.v;
+                  const isTop = j === drawn.length - 1;
+                  const h = Math.max(1, y0 - y1 - (j > 0 ? 2 : 0));
+                  const y = y1;
+                  const r = isTop ? Math.min(4, h / 2, barW / 2) : 0;
+                  const x = cx - barW / 2;
+                  const path = r
+                    ? `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + barW - r}Q${x + barW},${y} ${x + barW},${y + r}V${y + h}Z`
+                    : `M${x},${y}H${x + barW}V${y + h}H${x}Z`;
+                  return (
+                    <path key={p.key} d={path} fill={p.color}
+                      opacity={hover == null || hover === i ? 1 : 0.55}
+                      style={{ transition: "opacity 160ms" }} />
+                  );
+                })}
+                {(i === 0 || i === days.length - 1 || (days.length > 7 && i === Math.floor(days.length / 2))) && (
+                  <text x={cx} y={height - 6} textAnchor="middle" fontSize={10.5} fill="var(--chart-ink)">
+                    {new Date(day + "T00:00:00").toLocaleDateString([], { month: "short", day: "numeric" })}
+                  </text>
+                )}
+              </g>
+            );
+          })}
+        </svg>
+      )}
+      {hover != null && width > 0 && (
+        <div
+          className="pointer-events-none absolute top-0 z-10 rounded-[var(--r-xs)] border border-[var(--hairline-strong)] bg-[var(--surface-3)] px-3 py-2 shadow-[var(--shadow)]"
+          style={{ left: Math.min(pad.left + slot * hover + slot, Math.max(0, width - 140)) }}
+        >
+          <p className="text-[10.5px] text-[var(--text-dim)]">
+            {new Date(days[hover] + "T00:00:00").toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })}
+          </p>
+          {parts.map((p) => (
+            <div key={p.key} className="mt-1 flex items-center justify-between gap-5">
+              <span className="inline-flex items-center gap-1.5 text-[11px] text-[var(--text-muted)]">
+                <span className="h-2 w-2 rounded-[2px]" style={{ background: p.color }} />
+                {p.label}
+              </span>
+              <span className="tabular text-[12px] font-semibold">{p.values[hover] ?? 0}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* --- Meter -------------------------------------------------------------- */
+
+/**
+ * How full something is. The fill carries severity — calm, then warning,
+ * then danger — and the track is the same hue, fainter, so the state reads
+ * across the whole bar.
+ */
+export function Meter({
+  value,
+  max,
+  warnAt = 0.75,
+  dangerAt = 0.9,
+  invert = false,
+  className,
+}: {
+  value: number;
+  max: number;
+  warnAt?: number;
+  dangerAt?: number;
+  /** Higher is better (a success rate): low values are the warning. */
+  invert?: boolean;
+  className?: string;
+}) {
+  const ratio = max > 0 ? Math.min(1, Math.max(0, value / max)) : 0;
+  const level = invert ? 1 - ratio : ratio;
+  const tone = level >= dangerAt ? "var(--danger)" : level >= warnAt ? "var(--warn)" : invert ? "var(--ok)" : "var(--accent)";
+  return (
+    <div className={cx("h-1.5 w-full overflow-hidden rounded-full", className)}
+      style={{ background: `color-mix(in oklch, ${tone} 16%, transparent)` }}
+      role="meter" aria-valuenow={value} aria-valuemin={0} aria-valuemax={max}>
+      <div className="h-full rounded-full transition-[width] duration-[var(--t-move)] ease-[var(--ease-out)]"
+        style={{ width: `${ratio * 100}%`, background: tone }} />
+    </div>
+  );
+}
+
+/* --- Proportion bar (GitHub's language bar) ----------------------------- */
+
+export function ProportionBar({
+  items,
+  maxSlots = 5,
+}: {
+  items: { label: string; value: number }[];
+  maxSlots?: number;
+}) {
+  const sorted = [...items].sort((a, b) => b.value - a.value);
+  const shown = sorted.slice(0, maxSlots);
+  const rest = sorted.slice(maxSlots).reduce((s, i) => s + i.value, 0);
+  const parts = [
+    ...shown.map((it, i) => ({ ...it, color: SERIES[i] })),
+    ...(rest > 0 ? [{ label: "Other", value: rest, color: "var(--text-dim)" }] : []),
+  ];
+  const total = parts.reduce((s, p) => s + p.value, 0) || 1;
+  return (
+    <div>
+      <div className="flex h-2 w-full gap-[2px] overflow-hidden rounded-full">
+        {parts.map((p) => (
+          <div key={p.label} title={`${p.label} ${((p.value / total) * 100).toFixed(1)}%`}
+            style={{ width: `${(p.value / total) * 100}%`, background: p.color }} />
+        ))}
+      </div>
+      <ul className="mt-3 flex flex-wrap gap-x-4 gap-y-1.5 text-xs">
+        {parts.map((p) => (
+          <li key={p.label} className="inline-flex items-center gap-1.5">
+            <span className="h-2 w-2 rounded-full" style={{ background: p.color }} />
+            <span className="font-medium text-[var(--text)]">{p.label}</span>
+            <span className="tabular text-[var(--text-dim)]">{((p.value / total) * 100).toFixed(1)}%</span>
           </li>
         ))}
       </ul>
@@ -172,85 +547,101 @@ export function Breakdown({
   );
 }
 
-/* --- Ratio dial --------------------------------------------------------- */
+/* --- Ranked bars -------------------------------------------------------- */
 
-export function Gauge({
-  value,
-  label,
-  caption,
+export function RankedBars({
+  rows,
+  format = (v) => String(v),
 }: {
-  /** 0–1. */
-  value: number | null;
-  label: string;
-  caption?: string;
+  rows: { label: ReactNode; value: number; hint?: ReactNode }[];
+  format?: (v: number) => string;
 }) {
-  const pct = value === null ? 0 : Math.max(0, Math.min(1, value));
-  const radius = 42;
-  const circumference = 2 * Math.PI * radius;
-  const tone =
-    value === null
-      ? "var(--text-dim)"
-      : pct >= 0.8
-        ? "var(--ok)"
-        : pct >= 0.5
-          ? "var(--warn)"
-          : "var(--danger)";
-
+  const max = Math.max(1, ...rows.map((r) => r.value));
   return (
-    <div className="flex flex-col items-center">
-      <svg viewBox="0 0 100 100" className="h-28 w-28 -rotate-90">
-        <circle
-          cx="50"
-          cy="50"
-          r={radius}
-          fill="none"
-          stroke="var(--surface-3)"
-          strokeWidth="9"
-        />
-        <circle
-          cx="50"
-          cy="50"
-          r={radius}
-          fill="none"
-          stroke={tone}
-          strokeWidth="9"
-          strokeLinecap="round"
-          strokeDasharray={circumference}
-          strokeDashoffset={circumference * (1 - pct)}
-          style={{ transition: "stroke-dashoffset 0.6s ease" }}
-        />
-      </svg>
-      <p className="tabular -mt-[4.6rem] text-2xl font-semibold">
-        {value === null ? "—" : `${Math.round(pct * 100)}%`}
-      </p>
-      <p className="mt-11 text-sm font-medium">{label}</p>
-      {caption && (
-        <p className="mt-0.5 text-xs text-[var(--text-dim)]">{caption}</p>
-      )}
+    <ul className="space-y-3">
+      {rows.map((r, i) => (
+        <li key={i}>
+          <div className="mb-1.5 flex items-baseline justify-between gap-3 text-sm">
+            <span className="min-w-0 truncate">{r.label}</span>
+            <span className="tabular shrink-0 text-xs text-[var(--text-muted)]">
+              {format(r.value)} {r.hint}
+            </span>
+          </div>
+          <div className="h-1.5 w-full rounded-full bg-[var(--surface-3)]">
+            <div className="h-full rounded-full" style={{ width: `${(r.value / max) * 100}%`, background: "var(--series-1)" }} />
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/* --- Stat tile ---------------------------------------------------------- */
+
+export function StatTile({
+  label,
+  value,
+  hint,
+  trend,
+  icon,
+  tone,
+}: {
+  label: string;
+  value: ReactNode;
+  hint?: ReactNode;
+  trend?: Point[] | number[];
+  icon?: ReactNode;
+  tone?: "ok" | "warn" | "danger";
+}) {
+  return (
+    <div className="plate flex flex-col justify-between gap-3 px-5 py-4">
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--text-dim)]">{label}</p>
+        {icon && <span className="text-[var(--text-dim)]">{icon}</span>}
+      </div>
+      <div className="flex items-end justify-between gap-3">
+        <div className="min-w-0">
+          <p className={cx(
+            "text-[28px] font-semibold leading-none",
+            tone === "ok" && "text-[var(--ok)]",
+            tone === "warn" && "text-[var(--warn)]",
+            tone === "danger" && "text-[var(--danger)]",
+          )}>
+            {value}
+          </p>
+          {hint && <p className="mt-2 truncate text-xs text-[var(--text-dim)]">{hint}</p>}
+        </div>
+        {trend && trend.length > 1 && <Sparkline points={trend} />}
+      </div>
     </div>
   );
 }
 
-/* --- Panel -------------------------------------------------------------- */
+/* --- Chart card --------------------------------------------------------- */
 
-export function ChartCard({
+export function ChartPanel({
   title,
-  hint,
+  value,
+  caption,
   children,
   className,
 }: {
   title: string;
-  hint?: string;
+  value?: ReactNode;
+  caption?: ReactNode;
   children: ReactNode;
   className?: string;
 }) {
   return (
-    <Card className={cx("p-5", className)}>
-      <div className="mb-4">
-        <h3 className="font-semibold tracking-tight">{title}</h3>
-        {hint && <p className="mt-0.5 text-xs text-[var(--text-dim)]">{hint}</p>}
+    <div className={cx("plate px-5 pb-4 pt-4", className)}>
+      <div className="mb-8 flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-[13px] font-medium text-[var(--text-muted)]">{title}</p>
+          {value != null && <p className="mt-1 text-2xl font-semibold leading-none">{value}</p>}
+        </div>
+        {caption && <div className="shrink-0 text-right text-xs text-[var(--text-dim)]">{caption}</div>}
       </div>
       {children}
-    </Card>
+    </div>
   );
 }

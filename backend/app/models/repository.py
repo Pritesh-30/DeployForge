@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     Enum,
     ForeignKey,
@@ -87,6 +88,14 @@ class Repository(Base, UUIDMixin, TimestampMixin):
     # multi-service target is one deployment holding several containers on one
     # private network. NULL means an ordinary single-directory target.
     service_paths: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+
+    # Whether a push to the branch redeploys the app on its own. On by default
+    # — that is the point of connecting a repository — but a student mid-way
+    # through a broken refactor may want to push without taking the live
+    # version down.
+    auto_deploy: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
 
     # --- Detection results (null until the repo has been analyzed) ---
     detected_type: Mapped[DetectedType | None] = mapped_column(

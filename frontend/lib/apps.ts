@@ -5,98 +5,259 @@
  * build and run it. Rebuilding gives an app another deployment, not the
  * student another app, so the list they see is a list of apps and the history
  * lives inside each one.
- *
- * Lifecycle actions still belong to `lib/deployments.ts`: an app has no
- * lifecycle of its own, only the lifecycle of whichever deployment is current.
  */
 
 import { apiFetch } from "@/lib/api";
 import type { DetectedType, Deployment } from "@/lib/deployments";
+
+export type DayCount = { date: string; succeeded: number; failed: number };
+
+export type AppStats = {
+  builds: number;
+  succeeded: number;
+  failed: number;
+  success_rate: number | null;
+  build_seconds_median: number | null;
+  build_seconds_last: number | null;
+  build_seconds_trend: number[];
+  last_failure_at: string | null;
+  daily: DayCount[];
+};
 
 export type App = {
   id: string;
   name: string;
   full_name: string;
   target_label: string;
+  default_branch: string;
   deploy_path: string | null;
   service_paths: string[] | null;
   is_multi_service: boolean;
   detected_type: DetectedType | null;
   detected_framework: string | null;
+  auto_deploy: boolean;
   created_at: string;
   updated_at: string;
-
-  /**
-   * The deployment the app's URL points at: the running one, or the most
-   * recent attempt when nothing is up. Null only for an app connected but
-   * never built.
-   */
+  /** The running deployment, or the latest attempt. Null if never built. */
   current: Deployment | null;
   deployment_count: number;
   last_deployed_at: string | null;
+  owner_id?: string | null;
+  owner_email?: string | null;
 };
 
 export type AppDetail = App & {
-  /** Every deployment of this app, newest first. */
   deployments: Deployment[];
+  stats: AppStats;
 };
 
-export function listApps(): Promise<App[]> {
-  return apiFetch<App[]>("/apps");
-}
+export type Activity = {
+  id: string;
+  deployment_id: string;
+  app_id: string;
+  app_label: string;
+  stage: string;
+  level: "info" | "success" | "warning" | "error";
+  message: string;
+  actor: string | null;
+  created_at: string;
+};
 
-export function getApp(id: string): Promise<AppDetail> {
-  return apiFetch<AppDetail>(`/apps/${id}`);
-}
+/* --- Metrics ------------------------------------------------------------ */
 
-/** Remove the app entirely: its containers, its history, and the connection. */
-export function deleteApp(id: string): Promise<null> {
-  return apiFetch<null>(`/apps/${id}`, { method: "DELETE" });
-}
+export type Point = [number, number];
+export type Window = "1h" | "6h" | "24h";
 
-/* -------------------------------------------------------------------------
- * Reading an app's state
- * ---------------------------------------------------------------------- */
+export type AppMetrics = {
+  window: Window;
+  samples: number;
+  series: {
+    cpu: Point[];
+    mem: Point[];
+    latency: Point[];
+    net_rx: Point[];
+    net_tx: Point[];
+  };
+  summary: {
+    samples: number;
+    uptime: number | null;
+    latency_p50: number | null;
+    latency_p95: number | null;
+    cpu_avg: number | null;
+    cpu_max: number | null;
+    mem_avg: number | null;
+    mem_max: number | null;
+  };
+  latest: (Record<string, number> & { ts: number }) | null;
+};
 
-/**
- * What the app is doing right now, in one word.
- *
- * An app with no deployment has been connected but never built — "Not
- * deployed" rather than any status, because none of the deployment vocabulary
- * applies to something that has never been one.
- */
-export function appState(app: App): {
-  label: string;
-  tone: "ok" | "warn" | "danger" | "info" | "neutral";
-} {
-  if (!app.current) return { label: "Not deployed", tone: "neutral" };
+export type AppPulse = {
+  latest: (Record<string, number> & { ts: number }) | null;
+  cpu: Point[];
+  mem: Point[];
+  uptime: number | null;
+  latency_p50: number | null;
+};
+
+/* --- Code --------------------------------------------------------------- */
+
+export type TreeEntry = {
+  path: string;
+  type: "file" | "dir";
+  size: number;
+  sha: string | null;
+  submodule?: boolean;
+};
+
+export type CodeFile = {
+  path: string;
+  sha: string;
+  size: number;
+  language: string;
+  html_url: string;
+  binary: boolean;
+  too_large: boolean;
+  content: string | null;
+};
+
+export type Commit = {
+  sha: string;
+  message: string;
+  body: string;
+  author: string | null;
+  avatar_url: string | null;
+  date: string | null;
+  html_url: string | null;
+};
+
+export type CodeSummary = {
+  repository: {
+    full_name: string;
+    description: string | null;
+    default_branch: string;
+    private: boolean;
+    html_url: string;
+    stars: number;
+    forks: number;
+    open_issues: number;
+    size_kb: number;
+    language: string | null;
+    topics: string[];
+    license: string | null;
+    pushed_at: string | null;
+  };
+  ref: string;
+  sha: string;
+  deploy_path: string | null;
+  service_paths: string[] | null;
+  branch: string;
+  branches: { name: string; sha: string; protected: boolean }[];
+  languages: { name: string; bytes: number; share: number }[];
+  head: Commit | null;
+};
+
+export type Comparison = {
+  status: string;
+  ahead_by: number;
+  behind_by: number;
+  total_commits: number;
+  commits: Commit[];
+  files: { filename: string; status: string; additions: number; deletions: number; patch: string | null }[];
+  additions: number;
+  deletions: number;
+};
+
+/* --- Calls -------------------------------------------------------------- */
+
+export const listApps = () => apiFetch<App[]>("/apps");
+export const getApp = (id: string) => apiFetch<AppDetail>(`/apps/${id}`);
+export const appsPulse = () => apiFetch<Record<string, AppPulse>>("/apps/metrics/overview");
+export const myActivity = (limit = 50) => apiFetch<Activity[]>(`/apps/activity?limit=${limit}`);
+export const appActivity = (id: string) => apiFetch<Activity[]>(`/apps/${id}/activity`);
+export const appMetrics = (id: string, window: Window) =>
+  apiFetch<AppMetrics>(`/apps/${id}/metrics?window=${window}`);
+
+export const deleteApp = (id: string) => apiFetch<null>(`/apps/${id}`, { method: "DELETE" });
+
+export const updateApp = (id: string, changes: { branch?: string; auto_deploy?: boolean }) =>
+  apiFetch<AppDetail>(`/apps/${id}`, { method: "PATCH", body: JSON.stringify(changes) });
+
+export const redeployApp = (id: string) =>
+  apiFetch<{ deployment_id: string }>(`/apps/${id}/redeploy`, { method: "POST" });
+
+export const promoteDeployment = (appId: string, deploymentId: string) =>
+  apiFetch<Deployment>(`/apps/${appId}/deployments/${deploymentId}/promote`, { method: "POST" });
+
+const q = (params: Record<string, string | undefined | null>) => {
+  const s = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v) s.set(k, v);
+  const str = s.toString();
+  return str ? `?${str}` : "";
+};
+
+export const codeSummary = (id: string, ref?: string) =>
+  apiFetch<CodeSummary>(`/apps/${id}/code/summary${q({ ref })}`);
+export const codeTree = (id: string, ref?: string) =>
+  apiFetch<{ sha: string; entries: TreeEntry[]; truncated: boolean }>(`/apps/${id}/code/tree${q({ ref })}`);
+export const codeFile = (id: string, path: string, ref?: string) =>
+  apiFetch<CodeFile>(`/apps/${id}/code/file${q({ path, ref })}`);
+export const codeReadme = (id: string, dir: string, ref?: string) =>
+  apiFetch<{ path: string | null; name: string | null; content: string | null }>(
+    `/apps/${id}/code/readme${q({ dir, ref })}`,
+  );
+export const codeCommits = (id: string, ref?: string, path?: string, page = 1) =>
+  apiFetch<Commit[]>(`/apps/${id}/code/commits${q({ ref, path, page: String(page) })}`);
+export const codeCompare = (id: string, base: string, head: string) =>
+  apiFetch<Comparison>(`/apps/${id}/code/compare${q({ base, head })}`);
+
+/* --- Reading an app's state --------------------------------------------- */
+
+export type StateTone = "ok" | "warn" | "danger" | "info" | "neutral";
+
+/** What the app is doing right now, in a word or two. */
+export function appState(app: App): { label: string; tone: StateTone; live: boolean } {
+  if (app.current?.suspended_by_admin) return { label: "Suspended", tone: "danger", live: false };
+  if (!app.current) return { label: "Not deployed", tone: "neutral", live: false };
   switch (app.current.status) {
     case "running":
     case "live":
-      return { label: "Running", tone: "ok" };
+      return { label: "Running", tone: "ok", live: true };
     case "queued":
+      return { label: "Queued", tone: "info", live: false };
     case "building":
     case "pushing":
-      return { label: "Building", tone: "info" };
+      return { label: "Building", tone: "info", live: false };
     case "starting":
-      return { label: "Starting", tone: "info" };
+      return { label: "Starting", tone: "info", live: false };
     case "built":
-      return { label: "Built, not started", tone: "info" };
+      return { label: "Ready to start", tone: "info", live: false };
     case "stopped":
-      return { label: "Stopped", tone: "warn" };
+      return { label: "Stopped", tone: "warn", live: false };
     case "failed":
-      return { label: "Build failed", tone: "danger" };
-    case "analyzed":
-      return { label: "Not deployed", tone: "neutral" };
+      return { label: "Failed", tone: "danger", live: false };
     default:
-      return { label: app.current.status, tone: "neutral" };
+      return { label: "Not deployed", tone: "neutral", live: false };
   }
 }
 
-/** Whether anything about this app is still in motion, so it is worth polling. */
 export function appIsBusy(app: App): boolean {
-  if (!app.current) return false;
-  return ["queued", "building", "pushing", "starting"].includes(
-    app.current.status,
-  );
+  return !!app.current && ["queued", "building", "pushing", "starting"].includes(app.current.status);
+}
+
+/**
+ * What an app is, in a word: its framework when one was detected, "Docker"
+ * when it brings its own Dockerfile or Compose file (and so has no detected
+ * framework), and a dash rather than "Unknown" when nothing is known.
+ */
+export function appKind(app: Pick<App, "detected_framework" | "detected_type" | "is_multi_service">): string {
+  if (app.is_multi_service) return "Multi-service";
+  if (app.detected_framework) {
+    const names: Record<string, string> = {
+      nextjs: "Next.js", react: "React", express: "Express", node: "Node.js", django: "Django",
+      fastapi: "FastAPI", flask: "Flask", python: "Python", go: "Go", ruby: "Ruby", java: "Java",
+      php: "PHP", static: "Static site", vue: "Vue", svelte: "Svelte",
+    };
+    return names[app.detected_framework] ?? app.detected_framework;
+  }
+  return app.detected_type === "docker" ? "Docker" : "—";
 }

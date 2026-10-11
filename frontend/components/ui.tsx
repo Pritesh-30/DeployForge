@@ -133,6 +133,8 @@ export function Button({
   size?: "sm" | "md" | "lg";
   loading?: boolean;
   trailing?: ReactNode;
+  /** React 19 passes refs as an ordinary prop. */
+  ref?: React.Ref<HTMLButtonElement>;
 } & React.ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
     <button

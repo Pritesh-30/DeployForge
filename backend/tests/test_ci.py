@@ -484,7 +484,9 @@ async def test_deploy_queues_a_github_actions_build(
     async def fake_dispatch(deployment_id):
         dispatched.append(deployment_id)
 
-    monkeypatch.setattr(repository_routes.ci_service, "dispatch", fake_dispatch)
+    from app.builder import trigger
+
+    monkeypatch.setattr(trigger.ci_service, "dispatch", fake_dispatch)
 
     res = await client.post(f"/repos/{repository.id}/build", headers=headers)
 

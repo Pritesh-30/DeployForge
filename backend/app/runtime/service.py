@@ -194,21 +194,22 @@ async def start(
         raise RuntimeError_(
             "This stack has not been prepared yet. Build it before starting it."
         )
-    if deployment.suspended_by_admin and actor != "admin":
-        raise RuntimeError_(
-            deployment.suspension_reason
-            or "An administrator has suspended this deployment. Contact them to "
-            "have it resumed."
-        )
+    if actor != "admin":
+        suspension = await app_suspension(db, repository.id)
+        if suspension is not None:
+            raise RuntimeError_(suspension)
     if not user.can_deploy and actor != "admin":
         raise RuntimeError_(
             user.deploy_block_reason
             or "An administrator has revoked your permission to deploy."
         )
 
-    await check_quota(
-        db, user, excluding=deployment.id, excluding_repository=repository.id
-    )
+    # An administrator starting a student's app has decided to, knowing the
+    # quota they set; the quota is a bound on the student, not on them.
+    if actor != "admin":
+        await check_quota(
+            db, user, excluding=deployment.id, excluding_repository=repository.id
+        )
 
     if not await docker.daemon_available():
         raise RuntimeError_("The Docker daemon is not reachable on the server.")
@@ -612,6 +613,70 @@ async def restart(
     return await start(db, deployment, repository, user, actor=actor)
 
 
+async def app_suspension(db: AsyncSession, repository_id: uuid.UUID) -> str | None:
+    """
+    Why the app is suspended, or None if it is not.
+
+    Suspension is recorded on the deployment an administrator stopped, but it
+    applies to the *app*: otherwise the owner could redeploy, get a fresh
+    deployment row without the flag, and start that instead — and suspending
+    would stop nothing.
+    """
+    suspended = (
+        await db.execute(
+            select(Deployment)
+            .where(
+                Deployment.repository_id == repository_id,
+                Deployment.suspended_by_admin.is_(True),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if suspended is None:
+        return None
+    return suspended.suspension_reason or (
+        "An administrator has suspended this app. Contact them to have it resumed."
+    )
+
+
+async def promote(
+    db: AsyncSession,
+    deployment: Deployment,
+    repository: Repository,
+    user: User,
+    *,
+    actor: str = "owner",
+) -> Deployment:
+    """
+    Make an earlier deployment the live one again — a rollback.
+
+    The earlier build's image is still in the registry, so this is a start,
+    not a rebuild: seconds, not minutes, and it runs exactly the code that ran
+    before rather than whatever the branch says today. Starting it retires the
+    deployment that replaced it, through the same path a redeploy uses.
+    """
+    if deployment.repository_id != repository.id:
+        raise RuntimeError_("That deployment belongs to a different app.")
+    if deployment.status in (DeploymentStatus.RUNNING, DeploymentStatus.LIVE):
+        raise RuntimeError_("That deployment is already the live one.")
+    if deployment.status not in (DeploymentStatus.BUILT, DeploymentStatus.STOPPED):
+        raise RuntimeError_(
+            "Only a deployment that built successfully can be rolled back to."
+        )
+    if deployment.build_method is BuildMethod.COMPOSE and deployment.compose_project:
+        if compose.find_compose_file(compose.stack_dir_for(deployment.id)) is None:
+            raise RuntimeError_(
+                "This version's stack files are no longer kept on the server, "
+                "so it cannot be started again. Redeploy instead."
+            )
+
+    await record(
+        db, deployment.id, "start",
+        "Rolling back to this deployment.", actor=actor,
+    )
+    return await start(db, deployment, repository, user, actor=actor)
+
+
 async def destroy(
     db: AsyncSession, deployment: Deployment, *, actor: str = "owner"
 ) -> None:
@@ -670,9 +735,16 @@ async def release_interrupted_builds(db: AsyncSession) -> int:
     # A build running in GitHub Actions did not die with this process; it
     # will still report back. Only one that has gone silent for longer than
     # any build may take is given up on — see `ci_build_abandoned`.
+    #
+    # A build on the queue did not die with it either: the job is still in
+    # Redis, and its lapsed lease puts it back in line for the next worker.
+    # Only a build whose job is gone — Redis was wiped, or the row predates
+    # the queue — is truly stuck.
+    resumable = await _builds_still_queued([d for d in in_flight if not d.built_on_actions])
     stuck = [
         d for d in in_flight
-        if not d.built_on_actions or ci_build_abandoned(d)
+        if (d.built_on_actions and ci_build_abandoned(d))
+        or (not d.built_on_actions and d.id not in resumable)
     ]
 
     for deployment in stuck:
@@ -698,6 +770,32 @@ async def release_interrupted_builds(db: AsyncSession) -> int:
         await db.commit()
         logger.info("Released %d interrupted build(s)", len(stuck))
     return len(stuck)
+
+
+async def _builds_still_queued(deployments: list[Deployment]) -> set[uuid.UUID]:
+    """
+    Which of these deployments still have a live build job on the queue.
+
+    If Redis cannot be asked, the answer is "none": the safe failure is the
+    old behaviour — release them, and tell the student to press Redeploy —
+    rather than leaving rows saying `building` with no way to know whether
+    anything ever will.
+    """
+    if not deployments:
+        return set()
+    from app.queue.jobs import build_job_id
+    from app.queue.store import queue
+
+    live: set[uuid.UUID] = set()
+    try:
+        for deployment in deployments:
+            job = await queue.get(build_job_id(deployment.id))
+            if job and job.state in ("pending", "running", "delayed"):
+                live.add(deployment.id)
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not read the build queue at startup", exc_info=True)
+        return set()
+    return live
 
 
 def ci_build_abandoned(deployment: Deployment) -> bool:

@@ -17,15 +17,28 @@ class AppError(Exception):
 
     status_code: int = status.HTTP_400_BAD_REQUEST
     code: str = "app_error"
+    # Whether trying again later could succeed: the network, an upstream 5xx,
+    # a rate limit, a daemon that did not answer. The build queue retries these
+    # and nothing else — a build that failed because of the project's own code
+    # fails once, rather than three times while the student waits.
+    transient: bool = False
 
     def __init__(self, message: str, *, code: str | None = None,
-                 status_code: int | None = None) -> None:
+                 status_code: int | None = None,
+                 transient: bool | None = None) -> None:
         super().__init__(message)
         self.message = message
         if code is not None:
             self.code = code
         if status_code is not None:
             self.status_code = status_code
+        if transient is not None:
+            self.transient = transient
+
+
+def is_transient(exc: BaseException) -> bool:
+    """Whether a retry could plausibly succeed where this attempt failed."""
+    return bool(getattr(exc, "transient", False))
 
 
 class NotFoundError(AppError):
@@ -56,4 +69,6 @@ def register_error_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=exc.status_code,
             content={"error": {"code": exc.code, "message": exc.message}},
+            # e.g. Retry-After on a 429, so a client can wait the right time.
+            headers=getattr(exc, "headers", None),
         )

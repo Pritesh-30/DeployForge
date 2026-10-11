@@ -209,6 +209,10 @@ class Deployment(Base, UUIDMixin, TimestampMixin):
         Boolean, nullable=False, default=False, server_default="false"
     )
 
+    # Claude's explanation of a failure, stored so asking twice costs nothing:
+    # {summary, cause, fix, confidence, model, created_at}.
+    ai_diagnosis: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
     target_server_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
     logs_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

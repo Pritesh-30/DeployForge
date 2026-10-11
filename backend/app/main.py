@@ -12,11 +12,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
+import asyncio
 import logging
 import re
 from contextlib import asynccontextmanager
 
 from app.api import (
+    admin_ops_routes,
     admin_routes,
     app_routes,
     auth_routes,
@@ -28,8 +30,12 @@ from app.api import (
     repository_routes,
 )
 from app.config import settings
+from app.core import redis as redis_core
 from app.core.errors import register_error_handlers
 from app.db import AsyncSessionLocal, engine
+from app.metrics import collector as metrics_collector
+from app.queue.jobs import HANDLERS
+from app.queue.worker import Worker
 from app.runtime import docker as docker_runtime
 from app.runtime import service as runtime_service
 
@@ -89,8 +95,27 @@ async def lifespan(_app: FastAPI):
         # here costs one reconnect and removes the whole class of problem.
         await engine.dispose()
 
+    # Background work that belongs to the serving loop: the build queue's
+    # workers (unless a separate `python -m app.worker` runs them) and the
+    # sampler that records each running app's CPU, memory and response time.
+    stop = asyncio.Event()
+    background: list[asyncio.Task] = []
+    if settings.worker_embedded:
+        background.append(asyncio.create_task(Worker(HANDLERS).run(stop), name="build-queue"))
+    if settings.metrics_enabled:
+        background.append(asyncio.create_task(metrics_collector.run(stop), name="metrics"))
+
     yield
 
+    stop.set()
+    for task in background:
+        try:
+            await asyncio.wait_for(task, timeout=10)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            task.cancel()
+        except Exception:  # noqa: BLE001
+            logger.warning("Background task %s ended badly", task.get_name(), exc_info=True)
+    await redis_core.close_all()
     await engine.dispose()
 
 app = FastAPI(
@@ -122,6 +147,7 @@ app.include_router(environment_routes.router)
 app.include_router(deployment_routes.router)
 app.include_router(app_routes.router)
 app.include_router(admin_routes.router)
+app.include_router(admin_ops_routes.router)
 app.include_router(internal_routes.router)
 app.include_router(ci_routes.router)
 
@@ -144,11 +170,39 @@ async def health() -> dict:
         database = "unavailable"
         detail = f"{type(exc).__name__}: {exc}"
 
+    redis = "ok" if await redis_core.ping() else "unavailable"
+
     return {
-        "status": "ok" if database == "ok" else "degraded",
+        "status": "ok" if database == "ok" and redis == "ok" else "degraded",
         "service": "deployforge-api",
         "version": app.version,
         "environment": settings.app_env,
         "database": database,
+        "redis": redis,
+        "build_backend": settings.build_backend,
         "detail": detail,
     }
+
+
+@app.get("/meta", tags=["health"])
+async def meta() -> dict:
+    """What this installation can do, so the console shows only what works."""
+    from app.builder import ai_diagnosis
+
+    return {
+        "version": app.version,
+        "build_backend": settings.build_backend,
+        "app_domain": settings.app_domain,
+        "https": settings.app_scheme == "https",
+        "ai_diagnosis": ai_diagnosis.available(),
+        "metrics": settings.metrics_enabled,
+        "metrics_interval_seconds": settings.metrics_interval_seconds,
+        "build_concurrency": settings.build_concurrency,
+        "rate_limit_deploys_per_hour": settings.rate_limit_deploys_per_hour,
+        "rate_limit_deploy_burst": settings.rate_limit_deploy_burst,
+        "app_memory_limit": settings.app_memory_limit,
+        "app_cpu_limit": settings.app_cpu_limit,
+        "app_pids_limit": settings.app_pids_limit,
+        "metrics_retention_hours": settings.metrics_retention_hours,
+    }
+

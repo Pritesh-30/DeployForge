@@ -98,7 +98,8 @@ async def _fetch_tarball(access_token: str, full_name: str, ref: str, dest: Path
                         handle.write(chunk)
     except httpx.HTTPError as exc:
         raise RepositoryDownloadError(
-            f"Could not download the repository: {type(exc).__name__}"
+            f"Could not download the repository: {type(exc).__name__}",
+            transient=True,
         ) from exc
 
     if written == 0:

@@ -517,18 +517,20 @@ async def _signed_up(client, credentials):
 
 
 def _no_real_build(monkeypatch) -> list:
-    """Keep the endpoint tests from launching an actual build."""
-    started: list = []
+    """
+    Keep the endpoint tests from needing build tooling.
 
-    async def fake_run(deployment_id):
-        started.append(deployment_id)
+    Nothing is ever built in these tests anyway: a build is queued, and no
+    worker runs here to take it. What the endpoint queued is read back from
+    the (in-process) queue instead.
+    """
+    from app.builder import trigger
 
     async def ok_toolchain():
         return None
 
-    monkeypatch.setattr(repository_routes, "run_build", fake_run)
-    monkeypatch.setattr(repository_routes.pack, "check_toolchain", ok_toolchain)
-    return started
+    monkeypatch.setattr(trigger.pack, "check_toolchain", ok_toolchain)
+    return []
 
 
 @pytest.mark.asyncio
@@ -553,7 +555,7 @@ async def test_building_someone_elses_target_is_a_404(
 async def test_build_returns_202_and_queues_the_deployment(
     client, db_session, user_credentials, monkeypatch
 ):
-    started = _no_real_build(monkeypatch)
+    _no_real_build(monkeypatch)
     headers, user_id = await _signed_up(client, user_credentials)
     repository = await _target(db_session, user_id, deploy_path="backend")
 
@@ -565,7 +567,14 @@ async def test_build_returns_202_and_queues_the_deployment(
 
     deployment = await db_session.get(Deployment, uuid.UUID(body["deployment_id"]))
     assert deployment.status == DeploymentStatus.QUEUED
-    assert started == [deployment.id]  # handed to the background task
+
+    # Handed to the build queue, under its owner's fair share.
+    from app.queue.jobs import build_job_id
+    from app.queue.store import queue
+
+    job = await queue.get(build_job_id(deployment.id))
+    assert job is not None and job.state == "pending"
+    assert job.tenant == str(user_id)
 
 
 @pytest.mark.asyncio
@@ -643,7 +652,9 @@ async def test_missing_build_tooling_is_a_503_before_anything_is_queued(
     async def missing():
         raise BuildToolError("The `pack` CLI was not found on the server.")
 
-    monkeypatch.setattr(repository_routes.pack, "check_toolchain", missing)
+    from app.builder import trigger
+
+    monkeypatch.setattr(trigger.pack, "check_toolchain", missing)
 
     res = await client.post(f"/repos/{repository.id}/build", headers=headers)
     assert res.status_code == 503

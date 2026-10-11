@@ -59,6 +59,7 @@ export default function LandingPage() {
               ["#pipeline", "How it works"],
               ["#features", "Features"],
               ["#isolation", "Isolation"],
+              ["#compare", "Compare"],
             ].map(([href, label]) => (
               <a
                 key={href}
@@ -261,35 +262,47 @@ export default function LandingPage() {
           <Reveal className="mx-auto max-w-2xl text-center">
             <Eyebrow>Built in</Eyebrow>
             <h2 className="mt-6 text-[2.5rem] font-semibold leading-tight">
-              Everything the deploy actually needs
+              Everything after git push
             </h2>
           </Reveal>
 
           <div className="mt-16 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {[
               {
-                title: "Compose, in full",
-                body: "A repository with a compose file runs every service in it — web, database, queue — on its own private network.",
+                title: "Code, the way GitHub shows it",
+                body: "Browse every app's repository inside the console: file tree, syntax highlighting, READMEs, commit history, every branch. Press t to jump to any file.",
               },
               {
-                title: "Monorepos, handled",
-                body: "A repository with a frontend and a backend has two right answers. Every deployable directory is offered; you choose.",
+                title: "Rollback in seconds",
+                body: "Every version is kept as an image. Rolling back starts the old one — no rebuild — and the address your users have does not change.",
               },
               {
-                title: "Two logs, kept apart",
-                body: "The build log says why no image was produced. The runtime log says why the app will not stay up.",
+                title: "What changed, per deploy",
+                body: "Each deployment shows the commits and the diff since the one before it. \"It worked yesterday\" starts with an answer.",
+              },
+              {
+                title: "Live logs and live metrics",
+                body: "Build and runtime logs stream as they are written. CPU, memory, response time and uptime are sampled every few seconds and kept for a day.",
+              },
+              {
+                title: "A fair build queue",
+                body: "Builds wait in one lane per student and are taken in turn, so nobody waits behind someone else's ten pushes. Interrupted builds resume on their own.",
+              },
+              {
+                title: "Failures, explained",
+                body: "Known failures are recognised and explained in plain words. For the rest, Claude reads the log and says what broke and how to fix it.",
+              },
+              {
+                title: "Compose and monorepos",
+                body: "A compose file runs every service in it on a private network. A frontend and a backend in one repository deploy together and find each other by name.",
+              },
+              {
+                title: "Push to deploy",
+                body: "On GitHub Actions, every push builds in your own repository and deploys when it is ready. Turn it off per app while a branch is mid-refactor.",
               },
               {
                 title: "Encrypted configuration",
-                body: "Environment variables are encrypted at rest and injected at build and run time. Secrets never come back to the browser.",
-              },
-              {
-                title: "A URL per app",
-                body: "Every deployment gets its own hostname. Ten apps can all listen on port 3000 and none of them collide.",
-              },
-              {
-                title: "A full history",
-                body: "Download, build, push, start, stop — every step recorded, so a failure points at the stage that caused it.",
+                body: "Environment variables are encrypted at rest, masked in logs, and injected at build and run time. Secrets never come back to the browser.",
               },
             ].map((feature, i) => (
               <Reveal key={feature.title} delay={i * 60}>
@@ -354,6 +367,52 @@ export default function LandingPage() {
               </div>
             ))}
           </Reveal>
+        </div>
+      </section>
+
+      {/* --- Comparison --------------------------------------------------- */}
+      <section id="compare" className="border-t border-[var(--hairline)] bg-[var(--bg-deep)] px-4 py-28">
+        <div className="mx-auto max-w-5xl">
+          <Reveal className="mx-auto max-w-2xl text-center">
+            <Eyebrow>Where it fits</Eyebrow>
+            <h2 className="mt-6 text-[2.5rem] font-semibold leading-tight">Self-hosted, and built for many people</h2>
+            <p className="mt-4 leading-relaxed text-[var(--text-muted)]">
+              Managed platforms do not run on your own machines. Self-hosted ones assume one operator deploying their own apps.
+              DeployForge is for an institution hosting everyone&apos;s.
+            </p>
+          </Reveal>
+          <Reveal delay={100} className="mt-14 overflow-x-auto rounded-[var(--r)] border border-[var(--hairline)]">
+            <table className="w-full min-w-[40rem] text-sm">
+              <thead>
+                <tr className="border-b border-[var(--hairline)] bg-[var(--surface)] text-left text-xs text-[var(--text-dim)]">
+                  <th className="px-4 py-3 font-medium">Platform</th>
+                  {["Self-hosted", "Dockerfile", "Framework detection", "Subdomain + HTTPS", "Many independent users", "Open source"].map((h) => (
+                    <th key={h} className="px-3 py-3 text-center font-medium">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[var(--hairline)]">
+                {[
+                  ["Heroku", "no", "yes", "yes", "yes", "paid teams", "no"],
+                  ["Vercel", "no", "no", "frontend", "yes", "paid teams", "no"],
+                  ["Railway", "no", "yes", "yes", "yes", "paid teams", "no"],
+                  ["Dokku", "yes", "yes", "yes", "plugin", "single operator", "yes"],
+                  ["Coolify", "yes", "yes", "yes", "yes", "partial", "yes"],
+                  ["DeployForge", "yes", "yes", "yes", "yes", "yes, with quotas", "yes"],
+                ].map(([name, ...cells]) => (
+                  <tr key={name} className={name === "DeployForge" ? "bg-[var(--accent-soft)]" : undefined}>
+                    <td className={name === "DeployForge" ? "px-4 py-3 font-semibold text-[var(--accent)]" : "px-4 py-3 font-medium"}>{name}</td>
+                    {cells.map((c, i) => (
+                      <td key={i} className={"px-3 py-3 text-center text-xs " + (c === "no" ? "text-[var(--text-dim)]" : c === "yes" ? "text-[var(--ok)]" : "text-[var(--text-muted)]")}>
+                        {c === "yes" ? "✓" : c === "no" ? "—" : c}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Reveal>
+          <p className="mt-4 text-center text-xs text-[var(--text-dim)]">From each platform&apos;s public documentation of its core features.</p>
         </div>
       </section>
 

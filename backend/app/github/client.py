@@ -45,16 +45,23 @@ async def _get(access_token: str, path: str, **params: Any) -> Any:
                 params=params or None,
             )
     except httpx.HTTPError as exc:
-        raise GitHubApiError(f"Could not reach GitHub: {type(exc).__name__}") from exc
+        raise GitHubApiError(
+            f"Could not reach GitHub: {type(exc).__name__}", transient=True
+        ) from exc
 
     if response.status_code == 401:
         raise GitHubApiError(
             "GitHub rejected the stored token. Please reconnect your GitHub account.",
         )
     if response.status_code == 403 and "rate limit" in response.text.lower():
-        raise GitHubApiError("GitHub API rate limit exceeded. Try again later.")
+        raise GitHubApiError(
+            "GitHub API rate limit exceeded. Try again later.", transient=True
+        )
     if response.status_code >= 400:
-        raise GitHubApiError(f"GitHub API error (HTTP {response.status_code}).")
+        raise GitHubApiError(
+            f"GitHub API error (HTTP {response.status_code}).",
+            transient=response.status_code >= 500 or response.status_code == 429,
+        )
 
     try:
         return response.json()

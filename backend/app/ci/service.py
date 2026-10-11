@@ -46,7 +46,7 @@ from app.models.deployment import BuildMethod, Deployment, DeploymentStatus
 from app.models.event import EventLevel
 from app.models.repository import Repository
 from app.models.user import User
-from app.runtime import compose
+from app.runtime import compose, mirror
 from app.runtime import service as runtime
 from app.runtime.service import record
 
@@ -282,6 +282,13 @@ def _refusal(
         )
     if any(d.suspended_by_admin for d in siblings):
         return "An administrator has suspended this app."
+    # Only a push is refused: pressing Deploy is always a deliberate request.
+    if claims.get("event_name") != "workflow_dispatch" and not repository.auto_deploy:
+        return (
+            "Automatic deploys are turned off for this app, so this push was "
+            "not deployed. Turn them back on in the app's settings, or press "
+            "Deploy."
+        )
     return None
 
 
@@ -535,6 +542,14 @@ async def _after_build(
     if repository is None or user is None:
         return
 
+    log_file = Path(deployment.logs_ref or builder.log_path_for(deployment.id))
+    # Keep the images here, versioned by commit, and run them from here.
+    stored = await mirror.mirror_images(db, deployment.user_id, images, log_file)
+    if "" in stored:
+        deployment.image_ref = stored[""]
+    kept = [original for key, original in images.items() if stored.get(key) != original]
+    images = stored
+
     try:
         if repository.is_multi_service:
             await builder.write_stack(
@@ -556,6 +571,9 @@ async def _after_build(
     deployment.status = DeploymentStatus.BUILT
     deployment.build_finished_at = datetime.now(timezone.utc)
     await db.commit()
+
+    if kept:
+        await mirror.delete_from_github(db, deployment.user_id, kept, log_file)
 
     # Deploying is the point of the build: a push should end with the new
     # version live, not with a button to press. A newer build that has already

@@ -38,6 +38,11 @@ export type Deployment = {
   build_finished_at: string | null;
   error_message: string | null;
   has_logs: boolean;
+  /** Claude's explanation of a failure, once someone asked for it. */
+  ai_diagnosis: AiDiagnosis | null;
+  /** While waiting on this server: builds ahead, and builds waiting in all. */
+  queue_position?: number | null;
+  queue_size?: number | null;
   /** The GitHub Actions run that built this, when it was built there. */
   ci_run_url: string | null;
   /** What started that run: a push to the repository, or the dashboard. */
@@ -65,6 +70,15 @@ export type Deployment = {
 
   user_id?: string | null;
   user_email?: string | null;
+};
+
+export type AiDiagnosis = {
+  summary: string;
+  cause: string;
+  fix: string;
+  confidence: "high" | "medium" | "low";
+  model?: string;
+  created_at?: string;
 };
 
 export type DeploymentEvent = {
@@ -222,3 +236,10 @@ export function buildRepository(
 ): Promise<{ deployment_id: string; status: DeploymentStatus; target_label: string }> {
   return apiFetch(`/repos/${repoId}/build`, { method: "POST" });
 }
+
+export function diagnoseDeployment(id: string, refresh = false): Promise<AiDiagnosis> {
+  return apiFetch<AiDiagnosis>(`/deployments/${id}/diagnose${refresh ? "?refresh=true" : ""}`, {
+    method: "POST",
+  });
+}
+

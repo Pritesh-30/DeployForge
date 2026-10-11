@@ -28,12 +28,46 @@ services:
       timeout: 3s
       retries: 10
 
+  # The build queue, rate limits, metrics and cached GitHub responses. Nothing
+  # here is the source of truth — the database is — but losing it would drop
+  # queued builds, so it is persisted to disk.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", ""]
+    volumes:
+      - redisdata:/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Every version of every app is kept here, so rolling back never depends on
+  # GitHub. Published on the host's loopback only: the Docker daemon pushes
+  # and pulls through it, and nothing outside the machine can reach it.
+  registry:
+    image: registry:2
+    restart: unless-stopped
+    environment:
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - registry:/var/lib/registry
+    networks: [internal]
+
   backend:
     build: ./backend
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      registry:
+        condition: service_started
     environment:
       APP_ENV: production
       DATABASE_URL: postgresql+asyncpg://deployforge:${POSTGRES_PASSWORD}@db:5432/deployforge
@@ -55,7 +89,15 @@ services:
       # it. GitHub calls back to PUBLIC_API_URL, so it must be reachable.
       BUILD_BACKEND: actions
       PUBLIC_API_URL: https://api.${DOMAIN}
-      REGISTRY_PUSH: "false"
+      # Actions builds land on GitHub first; the server keeps its own copy of
+      # each version here and runs it from here. `localhost` is the Docker
+      # daemon's view — it is the daemon that pushes and pulls.
+      REGISTRY_PUSH: "true"
+      REGISTRY_HOST: localhost:5000
+      REDIS_URL: redis://redis:6379/0
+      # The API sits on the apps' network, so it measures their response time
+      # directly rather than out through the public address and back.
+      PROBE_MODE: direct
       REPO_WORKDIR: /var/lib/deployforge/work
       BUILD_LOG_DIR: /var/lib/deployforge/logs
       STACKS_DIR: /var/lib/deployforge/stacks
@@ -111,3 +153,5 @@ networks:
 volumes:
   pgdata:
   letsencrypt:
+  redisdata:
+  registry:

@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.builder import diagnose, pack, stack
 from app.config import settings
 from app.core.crypto import decrypt_value
+from app.core.errors import is_transient
 from app.db import AsyncSessionLocal
 from app.detection.candidates import ROOT_PATH, resolve_path
 from app.detection.detector import _DOCKERFILE_NAMES
@@ -121,27 +122,36 @@ async def _finish(
 
 
 async def run_build(
-    deployment_id: uuid.UUID, db: AsyncSession | None = None
+    deployment_id: uuid.UUID,
+    db: AsyncSession | None = None,
+    *,
+    final_attempt: bool = True,
 ) -> None:
     """
     Build the image for `deployment_id`.
 
-    Safe to hand to a background task: by default it opens its own session,
-    because the request that queued the build has already finished. A session
-    can be passed in instead — tests do that so the build sees the same
-    transaction they set up.
+    Opens its own session by default, because the request that queued the
+    build has long finished by the time a worker picks it up. A session can be
+    passed in instead — tests do that so the build sees the same transaction
+    they set up.
 
-    Every failure becomes a `failed` deployment with a reason and a log file;
-    nothing escapes.
+    Every failure becomes a `failed` deployment with a reason and a log file,
+    with one exception: a *transient* fault (the network, GitHub's 5xx, a
+    Docker daemon that did not answer) on an attempt that is not the last is
+    raised, so the queue can retry it after a backoff. The deployment goes
+    back to `queued` meanwhile, with an event saying why, rather than
+    reporting a failure that a minute's patience would have avoided.
     """
     if db is not None:
-        await _run_with_session(db, deployment_id)
+        await _run_with_session(db, deployment_id, final_attempt=final_attempt)
         return
     async with AsyncSessionLocal() as own_session:
-        await _run_with_session(own_session, deployment_id)
+        await _run_with_session(own_session, deployment_id, final_attempt=final_attempt)
 
 
-async def _run_with_session(db: AsyncSession, deployment_id: uuid.UUID) -> None:
+async def _run_with_session(
+    db: AsyncSession, deployment_id: uuid.UUID, *, final_attempt: bool = True
+) -> None:
     deployment = await db.get(Deployment, deployment_id)
     if deployment is None:
         logger.warning("Build requested for unknown deployment %s", deployment_id)
@@ -163,6 +173,17 @@ async def _run_with_session(db: AsyncSession, deployment_id: uuid.UUID) -> None:
     try:
         await _build(db, deployment, repository, log_file)
     except Exception as exc:  # noqa: BLE001 — never leave a build stuck
+        if is_transient(exc) and not final_attempt:
+            _append(log_file, f"\nTemporary failure: {exc}. Retrying shortly.\n")
+            deployment.status = DeploymentStatus.QUEUED
+            deployment.error_message = None
+            await db.commit()
+            await record(
+                db, deployment_id, "build",
+                f"Temporary failure, will retry: {exc}",
+                level=EventLevel.WARNING,
+            )
+            raise
         logger.exception("Build %s failed unexpectedly", deployment_id)
         _append(log_file, f"\nBuild failed: {type(exc).__name__}: {exc}\n")
         await _finish(

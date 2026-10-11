@@ -64,6 +64,77 @@ function formatDetail(detail: unknown): string | null {
   return null;
 }
 
+/* -------------------------------------------------------------------------
+ * Server-Sent Events
+ * ---------------------------------------------------------------------- */
+
+export type StreamEvent = { event: string; data: Record<string, unknown> };
+
+/**
+ * Read an SSE endpoint with `fetch`, not `EventSource`.
+ *
+ * `EventSource` cannot send an Authorization header, and putting the token
+ * in the URL would write it into every proxy and access log on the way.
+ * Returns a function that closes the stream.
+ */
+export function apiStream(
+  path: string,
+  onEvent: (e: StreamEvent) => void,
+  onError?: (err: Error) => void,
+): () => void {
+  const controller = new AbortController();
+
+  (async () => {
+    try {
+      const res = await fetch(`${API_URL}${path}`, {
+        headers: { Accept: "text/event-stream", ...authHeader() },
+        signal: controller.signal,
+      });
+      if (!res.ok || !res.body) {
+        const body = await res.json().catch(() => null);
+        throw new ApiError(
+          (body as { error?: { message?: string } } | null)?.error?.message ??
+            `Stream failed with status ${res.status}`,
+          res.status,
+        );
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // Events are separated by a blank line.
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary !== -1) {
+          const raw = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          boundary = buffer.indexOf("\n\n");
+          if (raw.startsWith(":")) continue; // heartbeat comment
+          let name = "message";
+          const data: string[] = [];
+          for (const line of raw.split("\n")) {
+            if (line.startsWith("event: ")) name = line.slice(7);
+            else if (line.startsWith("data: ")) data.push(line.slice(6));
+          }
+          if (data.length === 0) continue;
+          try {
+            onEvent({ event: name, data: JSON.parse(data.join("\n")) });
+          } catch {
+            /* a malformed event is skipped, not fatal */
+          }
+        }
+      }
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      onError?.(err instanceof Error ? err : new Error(String(err)));
+    }
+  })();
+
+  return () => controller.abort();
+}
+
 export type HealthResponse = {
   status: string;
   service: string;

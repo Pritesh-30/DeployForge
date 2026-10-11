@@ -27,12 +27,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import CurrentUser
-from app.builder import pack
 from app.builder import stack
-from app.builder.service import run_build
-from app.ci import service as ci_service
-from app.config import settings
-from app.core.errors import PermissionError_, AppError, ConflictError, NotFoundError
+from app.builder.trigger import trigger_build
+from app.core.errors import PermissionError_, AppError, NotFoundError
+from app.core.ratelimit import deploy_limiter
 from app.db import get_db
 from app.detection.candidates import (
     ROOT_PATH,
@@ -53,7 +51,6 @@ from app.github.scan_token import create_scan_token, read_scan_token
 from app.github.token import get_access_token
 from app.models.deployment import BuildMethod, Deployment, DeploymentStatus
 from app.models.repository import DetectedType, Repository
-from app.runtime.service import ci_build_abandoned, release_abandoned_ci_build
 from app.schemas.deployment import BuildStartedOut
 from app.schemas.repository import (
     CandidateOut,
@@ -486,8 +483,6 @@ async def analyze_repository(
     )
 
 
-# Statuses that mean a build is already in flight for this target.
-_IN_FLIGHT = (DeploymentStatus.QUEUED, DeploymentStatus.BUILDING)
 
 
 @router.post(
@@ -502,108 +497,24 @@ async def build_repository(
     background_tasks: BackgroundTasks,
 ) -> BuildStartedOut:
     """
-    Build a container image for this target with Cloud Native Buildpacks.
+    Build this target and deploy the result.
 
-    Returns immediately with 202: a build takes minutes, so it runs in the
-    background and the client polls `GET /deployments/{id}`. The tooling is
-    checked first, so a missing `pack` or Docker fails here with a fixable
-    message instead of silently marking the deployment failed a moment later.
+    Returns immediately with 202. On this server the build joins the fair
+    build queue and a worker runs it; on the Actions backend it runs in the
+    student's own GitHub Actions. Either way the client follows it on
+    `GET /deployments/{id}`, and the tooling it needs is checked first so a
+    missing `pack` fails here with a fixable message.
 
-    The `analyzed` row created when the target was selected is reused for its
-    first build; later builds append a new row, one per attempt.
+    Rate limited per account: one person cannot turn the shared build machine
+    into their own CI.
     """
     _require_deploy_permission(current_user)
     repository = await _owned_repository(db, repo_id, current_user.id)
+    await deploy_limiter.check(current_user.id)
 
-    if settings.builds_on_actions:
-        return await _build_on_actions(db, repository, current_user, background_tasks)
-
-    # Only a buildpack build needs `pack`. A repository with its own Dockerfile
-    # is built by Docker alone, and demanding an unrelated tool before starting
-    # would block the one path that needs nothing extra installed. The final
-    # decision is made against the downloaded files (see `builder/service.py`);
-    # this is the early, fixable version of it.
-    if repository.detected_type is not DetectedType.DOCKER:
-        await pack.check_toolchain()
-
-    existing = (
-        await db.execute(
-            select(Deployment)
-            .where(Deployment.repository_id == repository.id)
-            .order_by(Deployment.created_at.desc(), Deployment.id.desc())
-        )
-    ).scalars().all()
-
-    if any(d.status in _IN_FLIGHT for d in existing):
-        raise ConflictError(
-            f"A build is already running for {repository.target_label}."
-        )
-
-    latest = existing[0] if existing else None
-    if latest is not None and latest.status == DeploymentStatus.ANALYZED:
-        deployment = latest  # first build continues the analysis record
-    else:
-        deployment = Deployment(
-            repository_id=repository.id,
-            user_id=current_user.id,
-            commit_sha=latest.commit_sha if latest else None,
-            build_method=latest.build_method if latest else None,
-        )
-        db.add(deployment)
-
-    deployment.status = DeploymentStatus.QUEUED
-    deployment.error_message = None
-    deployment.image_ref = None
-    deployment.build_started_at = None
-    deployment.build_finished_at = None
-    await db.commit()
-    await db.refresh(deployment)
-
-    background_tasks.add_task(run_build, deployment.id)
-
-    return BuildStartedOut(
-        deployment_id=deployment.id,
-        status=deployment.status,
-        target_label=repository.target_label,
+    deployment = await trigger_build(
+        db, repository, current_user, background_tasks=background_tasks
     )
-
-
-async def _build_on_actions(
-    db: AsyncSession,
-    repository: Repository,
-    user,
-    background_tasks: BackgroundTasks,
-) -> BuildStartedOut:
-    """
-    Start a build in the student's own GitHub Actions.
-
-    The checks that need the student — permissions only they can grant — are
-    made here, in the request, so the error appears on the button they
-    pressed. Talking to GitHub happens in the background.
-    """
-    ci_service.ensure_configured()
-    await ci_service.ensure_scopes(db, user.id)
-
-    in_flight = (
-        await db.execute(
-            select(Deployment).where(
-                Deployment.repository_id == repository.id,
-                Deployment.status.in_(_IN_FLIGHT),
-            )
-        )
-    ).scalars().all()
-    for deployment in in_flight:
-        if deployment.built_on_actions and ci_build_abandoned(deployment):
-            release_abandoned_ci_build(deployment)
-        else:
-            raise ConflictError(
-                f"A build is already running for {repository.target_label}."
-            )
-    await db.commit()
-
-    deployment = await ci_service.queue(db, repository, user)
-    background_tasks.add_task(ci_service.dispatch, deployment.id)
-
     return BuildStartedOut(
         deployment_id=deployment.id,
         status=deployment.status,

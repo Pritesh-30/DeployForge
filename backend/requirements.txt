@@ -22,9 +22,18 @@ python-multipart==0.0.20
 httpx==0.28.1
 cryptography==44.0.0
 
+# --- Queue, rate limits, metrics, caching ---
+redis==5.2.1
+
+# --- Optional AI diagnosis of failed deployments ---
+anthropic==1.13.0
+
 # --- Tests ---
 pytest==8.3.4
 pytest-asyncio==0.25.0
+# Redis in-process for tests, with Lua so the queue's atomic scripts run as
+# they do against a real server.
+fakeredis[lua]==2.26.2
 
 # Rewriting a student compose file to remove host port bindings.
 PyYAML==6.0.3

@@ -34,6 +34,8 @@ class DeploymentOut(BaseModel):
     build_finished_at: datetime | None = None
     error_message: str | None = None
     has_logs: bool = False
+    # Claude's explanation, once someone has asked for one.
+    ai_diagnosis: dict | None = None
     # Set when the build ran in GitHub Actions: where its live output is, and
     # whether a push or the dashboard started it.
     ci_run_url: str | None = None
@@ -51,6 +53,11 @@ class DeploymentOut(BaseModel):
     compose_project: str | None = None
     compose_services: list[str] | None = None
     compose_web_service: str | None = None
+
+    # While queued on this server: how many builds go first, of how many
+    # waiting. Fair across students, so it is not simply arrival order.
+    queue_position: int | None = None
+    queue_size: int | None = None
 
     repository_id: uuid.UUID
     full_name: str
@@ -173,4 +180,10 @@ class PlatformStatusOut(BaseModel):
     registry: bool
     router: bool
     buildpacks: bool
+    redis: bool = False
+    database: bool = True
+    # Workers that have taken a build recently, and builds running right now.
+    builds_running: int = 0
+    builds_waiting: int = 0
+    build_backend: str = "local"
     detail: dict[str, str] = {}
