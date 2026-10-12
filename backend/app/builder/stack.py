@@ -82,6 +82,28 @@ def service_urls(names: list[str], port: int = DEFAULT_PORT) -> dict[str, str]:
     return {env_var_for(name): f"http://{name}:{port}" for name in names}
 
 
+def with_environment(text: str, env: dict[str, str]) -> str | None:
+    """
+    The same generated stack with its environment brought up to date.
+
+    A multi-service stack's compose file is written when it is built, with
+    the student's variables in it. Starting it again after they changed a
+    variable must use the new value, not the one from build time — so the
+    environment is recomputed from the wiring and the current variables.
+    Returns None for a file this module did not write.
+    """
+    try:
+        definition = json.loads(text)
+        services = definition["services"]
+        port = int(next(iter(services.values()))["environment"]["PORT"])
+    except (ValueError, KeyError, TypeError, StopIteration):
+        return None
+    wiring = service_urls(list(services), port)
+    for service in services.values():
+        service["environment"] = {"PORT": str(port), **wiring, **env}
+    return json.dumps(definition, indent=2, sort_keys=True)
+
+
 def compose_file(
     *,
     services: dict[str, str],

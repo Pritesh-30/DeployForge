@@ -86,10 +86,11 @@ async def _run(
         completed = await asyncio.to_thread(call)
     except subprocess.TimeoutExpired as exc:
         raise DockerError(
-            f"`docker {args[0]}` did not finish within {timeout:.0f}s."
+            f"`docker {args[0]}` did not finish within {timeout:.0f}s.",
+            transient=True,
         ) from exc
     except OSError as exc:
-        raise DockerError(f"Could not run docker: {exc}") from exc
+        raise DockerError(f"Could not run docker: {exc}", transient=True) from exc
 
     return CommandResult(
         exit_code=completed.returncode,

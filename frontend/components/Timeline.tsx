@@ -10,6 +10,7 @@
 "use client";
 
 import { Dot, Mono, relativeTime, type Tone } from "@/components/ui";
+import { actorName } from "@/lib/format";
 import type { DeploymentEvent } from "@/lib/deployments";
 
 const LEVEL_TONE: Record<DeploymentEvent["level"], Tone> = {
@@ -61,9 +62,9 @@ export default function Timeline({ events }: { events: DeploymentEvent[] }) {
                 <span className="text-sm font-medium">
                   {STAGE_LABEL[event.stage] ?? event.stage}
                 </span>
-                {event.actor && (
+                {actorName(event.actor) && (
                   <span className="text-xs text-[var(--text-dim)]">
-                    by {event.actor}
+                    by {actorName(event.actor)}
                   </span>
                 )}
                 <span className="ml-auto text-xs text-[var(--text-dim)]">

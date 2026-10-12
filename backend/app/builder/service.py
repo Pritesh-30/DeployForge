@@ -33,9 +33,10 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.builder import diagnose, pack, stack
+from app.builder import diagnose, pack, reuse, stack
 from app.config import settings
 from app.core.crypto import decrypt_value
+from app.core.errors import is_transient
 from app.db import AsyncSessionLocal
 from app.detection.candidates import ROOT_PATH, resolve_path
 from app.detection.detector import _DOCKERFILE_NAMES
@@ -121,27 +122,37 @@ async def _finish(
 
 
 async def run_build(
-    deployment_id: uuid.UUID, db: AsyncSession | None = None
+    deployment_id: uuid.UUID,
+    db: AsyncSession | None = None,
+    *,
+    final_attempt: bool = True,
+    fresh: bool = False,
 ) -> None:
     """
     Build the image for `deployment_id`.
 
-    Safe to hand to a background task: by default it opens its own session,
-    because the request that queued the build has already finished. A session
-    can be passed in instead — tests do that so the build sees the same
-    transaction they set up.
+    Opens its own session by default, because the request that queued the
+    build has long finished by the time a worker picks it up. A session can be
+    passed in instead — tests do that so the build sees the same transaction
+    they set up.
 
-    Every failure becomes a `failed` deployment with a reason and a log file;
-    nothing escapes.
+    Every failure becomes a `failed` deployment with a reason and a log file,
+    with one exception: a *transient* fault (the network, GitHub's 5xx, a
+    Docker daemon that did not answer) on an attempt that is not the last is
+    raised, so the queue can retry it after a backoff. The deployment goes
+    back to `queued` meanwhile, with an event saying why, rather than
+    reporting a failure that a minute's patience would have avoided.
     """
     if db is not None:
-        await _run_with_session(db, deployment_id)
+        await _run_with_session(db, deployment_id, final_attempt=final_attempt, fresh=fresh)
         return
     async with AsyncSessionLocal() as own_session:
-        await _run_with_session(own_session, deployment_id)
+        await _run_with_session(own_session, deployment_id, final_attempt=final_attempt, fresh=fresh)
 
 
-async def _run_with_session(db: AsyncSession, deployment_id: uuid.UUID) -> None:
+async def _run_with_session(
+    db: AsyncSession, deployment_id: uuid.UUID, *, final_attempt: bool = True, fresh: bool = False
+) -> None:
     deployment = await db.get(Deployment, deployment_id)
     if deployment is None:
         logger.warning("Build requested for unknown deployment %s", deployment_id)
@@ -158,11 +169,23 @@ async def _run_with_session(db: AsyncSession, deployment_id: uuid.UUID) -> None:
     deployment.build_started_at = datetime.now(timezone.utc)
     deployment.logs_ref = str(log_file)
     deployment.error_message = None
+    deployment.reused_from_id = None
     await db.commit()
 
     try:
-        await _build(db, deployment, repository, log_file)
+        await _build(db, deployment, repository, log_file, fresh=fresh)
     except Exception as exc:  # noqa: BLE001 — never leave a build stuck
+        if is_transient(exc) and not final_attempt:
+            _append(log_file, f"\nTemporary failure: {exc}. Retrying shortly.\n")
+            deployment.status = DeploymentStatus.QUEUED
+            deployment.error_message = None
+            await db.commit()
+            await record(
+                db, deployment_id, "build",
+                f"Temporary failure, will retry: {exc}",
+                level=EventLevel.WARNING,
+            )
+            raise
         logger.exception("Build %s failed unexpectedly", deployment_id)
         _append(log_file, f"\nBuild failed: {type(exc).__name__}: {exc}\n")
         await _finish(
@@ -183,6 +206,8 @@ async def _build(
     deployment: Deployment,
     repository: Repository,
     log_file: Path,
+    *,
+    fresh: bool = False,
 ) -> None:
     """The happy path, with each failure recorded rather than raised."""
     if not await pack.docker_available():
@@ -211,6 +236,16 @@ async def _build(
     )
     image_ref = registry_ref(local_ref)
     env = await _environment_for(db, repository.id)
+
+    # Built from exactly these inputs before? Then that image is this build.
+    if not fresh and not repository.is_multi_service:
+        prior = await reuse.find_reusable(
+            db, repository_id=repository.id, exclude=deployment.id,
+            commit_sha=commit_sha, deploy_path=repository.deploy_path, env=env,
+        )
+        if prior is not None:
+            await _reuse(db, deployment, prior, log_file)
+            return
 
     await record(
         db, deployment.id, "download",
@@ -351,6 +386,10 @@ async def _build(
         db, deployment.id, "build", f"Built {image_ref}.", level=EventLevel.SUCCESS
     )
     await _push(db, deployment, image_ref, log_file)
+    deployment.build_fingerprint = reuse.fingerprint(
+        commit_sha=commit_sha, deploy_path=repository.deploy_path,
+        method=deployment.build_method, env=env,
+    )
 
     await _finish(db, deployment, status=DeploymentStatus.BUILT, image_ref=image_ref)
 
@@ -658,6 +697,30 @@ async def _build_with_buildpacks(
         )
         return True, None
     return False, outcome.error or "The buildpack build failed."
+
+
+async def _reuse(
+    db: AsyncSession, deployment: Deployment, prior: Deployment, log_file: Path
+) -> None:
+    """Finish this build with an identical earlier one's image."""
+    deployment.build_method = prior.build_method
+    deployment.build_fingerprint = prior.build_fingerprint
+    deployment.reused_from_id = prior.id
+    if prior.app_port and not deployment.app_port:
+        deployment.app_port = prior.app_port
+    _append(
+        log_file,
+        f"Nothing to build: deployment {str(prior.id)[:8]} was built from the same commit "
+        f"({(deployment.commit_sha or '')[:12]}) with the same settings.\n"
+        f"Reusing its image {prior.image_ref}.\n\n"
+        "Redeploy with \"Rebuild from scratch\" to build it again anyway.\n",
+    )
+    await _finish(db, deployment, status=DeploymentStatus.BUILT, image_ref=prior.image_ref)
+    await record(
+        db, deployment.id, "build",
+        f"Skipped the build: reused the identical image from deployment {str(prior.id)[:8]}.",
+        level=EventLevel.SUCCESS,
+    )
 
 
 async def _push(

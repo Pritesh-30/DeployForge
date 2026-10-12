@@ -29,6 +29,7 @@ from app.models.user import User, UserRole
 from app.runtime import docker as docker_runtime
 from app.runtime import service as runtime_service
 from app.schemas.auth import UserOut
+from app.services.audit import audit
 from app.schemas.deployment import (
     AdminUserUpdate,
     DeploymentOut,
@@ -186,7 +187,7 @@ async def _deployment_with_context(
 @router.post("/deployments/{deployment_id}/suspend", response_model=DeploymentOut)
 async def suspend_deployment(
     deployment_id: uuid.UUID,
-    _admin: AdminUser,
+    admin: AdminUser,
     db: DbSession,
     payload: SuspendRequest | None = None,
 ) -> DeploymentOut:
@@ -199,22 +200,35 @@ async def suspend_deployment(
     student a second later.
     """
     deployment, repository, owner = await _deployment_with_context(db, deployment_id)
-    await runtime_service.stop(
-        db, deployment, actor="admin", suspend=True,
-        reason=payload.reason if payload else None,
-    )
+    reason = payload.reason if payload else None
+    await runtime_service.stop(db, deployment, actor="admin", suspend=True, reason=reason)
+    await audit(db, admin, "app.suspend", target_type="app", target_id=repository.id,
+                target_label=repository.target_label, subject_user_id=owner.id,
+                detail={"deployment": str(deployment.id), **({"reason": reason} if reason else {})})
     return deployment_out(deployment, repository, user_email=owner.email)
 
 
 @router.post("/deployments/{deployment_id}/resume", response_model=DeploymentOut)
 async def resume_deployment(
-    deployment_id: uuid.UUID, _admin: AdminUser, db: DbSession
+    deployment_id: uuid.UUID, admin: AdminUser, db: DbSession
 ) -> DeploymentOut:
     """Lift a suspension, and start the app again if it has an image."""
     deployment, repository, owner = await _deployment_with_context(db, deployment_id)
-    deployment.suspended_by_admin = False
-    deployment.suspension_reason = None
+    # Suspension applies to the whole app, so lifting it does too.
+    suspended = (
+        await db.execute(
+            select(Deployment).where(
+                Deployment.repository_id == repository.id,
+                Deployment.suspended_by_admin.is_(True),
+            )
+        )
+    ).scalars().all()
+    for d in {*suspended, deployment}:
+        d.suspended_by_admin = False
+        d.suspension_reason = None
     await db.commit()
+    await audit(db, admin, "app.resume", target_type="app", target_id=repository.id,
+                target_label=repository.target_label, subject_user_id=owner.id)
     await runtime_service.record(
         db, deployment.id, "resume",
         "Suspension lifted by an administrator.", actor="admin",
@@ -226,11 +240,14 @@ async def resume_deployment(
 
 @router.delete("/deployments/{deployment_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def admin_delete_deployment(
-    deployment_id: uuid.UUID, _admin: AdminUser, db: DbSession
+    deployment_id: uuid.UUID, admin: AdminUser, db: DbSession
 ) -> Response:
     """Remove any deployment on the platform, along with its container."""
-    deployment, _repository, _owner = await _deployment_with_context(db, deployment_id)
+    deployment, repository, owner = await _deployment_with_context(db, deployment_id)
     await runtime_service.destroy(db, deployment, actor="admin")
+    await audit(db, admin, "deployment.delete", target_type="deployment",
+                target_id=deployment_id, target_label=repository.target_label,
+                subject_user_id=owner.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -276,9 +293,26 @@ async def update_user(
     elif payload.deploy_block_reason is not None:
         user.deploy_block_reason = payload.deploy_block_reason
 
+    changes = payload.model_dump(exclude_none=True)
     await db.commit()
     await db.refresh(user)
+    if changes:
+        await audit(db, admin, _user_action(changes), target_type="user", target_id=user.id,
+                    target_label=user.email, subject_user_id=user.id, detail=changes)
     return UserOut.model_validate(user)
+
+
+def _user_action(changes: dict) -> str:
+    """The most significant thing an account update did, as an audit verb."""
+    if "is_active" in changes:
+        return "user.enable" if changes["is_active"] else "user.disable"
+    if "can_deploy" in changes:
+        return "user.allow_deploy" if changes["can_deploy"] else "user.block_deploy"
+    if "role" in changes:
+        return "user.role"
+    if "max_deployments" in changes:
+        return "user.quota"
+    return "user.update"
 
 
 @router.get("/analytics", response_model=PlatformAnalyticsOut)
@@ -470,11 +504,33 @@ async def platform_status(_admin: AdminUser) -> PlatformStatusOut:
         buildpacks_ok = False
         detail["buildpacks"] = exc.message
 
+    from app.core import redis as redis_core
+    from app.queue.store import queue
+
+    redis_ok = await redis_core.ping()
+    running = waiting = 0
+    if redis_ok:
+        try:
+            snapshot = await queue.snapshot(recent=0)
+            running = len(snapshot.running)
+            waiting = sum(len(jobs) for jobs in snapshot.pending.values()) + len(snapshot.delayed)
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        detail["redis"] = (
+            "Redis is not reachable, so builds cannot be queued and metrics are "
+            "not being recorded."
+        )
+
     return PlatformStatusOut(
         docker=docker_ok,
         registry=registry_ok,
         router=router_ok,
         buildpacks=buildpacks_ok,
+        redis=redis_ok,
+        builds_running=running,
+        builds_waiting=waiting,
+        build_backend=settings.build_backend,
         detail=detail,
     )
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Checkbox } from "@/components/Controls";
 import { Button, Skeleton } from "@/components/ui";
 import { TrashIcon } from "@/components/Icons";
 import {
@@ -215,15 +216,9 @@ export default function EnvVarEditor({
               spellCheck={false}
               className="w-full min-w-0 flex-[2] rounded-[var(--r-sm)] border border-[var(--hairline-strong)] bg-[var(--surface-2)] px-3 py-2 font-[family-name:var(--font-jetbrains-mono)] text-sm outline-none focus:border-[var(--accent-line)]"
             />
-            <label className="flex cursor-pointer items-center gap-1.5 text-xs text-[var(--text-muted)]">
-              <input
-                type="checkbox"
-                checked={row.is_secret}
-                onChange={(e) => update(index, { is_secret: e.target.checked })}
-                className="accent-[var(--accent)]"
-              />
+            <Checkbox checked={row.is_secret} onChange={(v) => update(index, { is_secret: v })}>
               secret
-            </label>
+            </Checkbox>
             <button
               onClick={() => removeRow(index)}
               aria-label={`Remove ${row.key || "variable"}`}
@@ -264,7 +259,7 @@ export default function EnvVarEditor({
         Tick <strong className="font-medium text-[var(--text-muted)]">secret</strong>{" "}
         for anything sensitive — a secret&apos;s value is never sent back to the
         browser after it is saved, so its box shows a mask and leaving it empty
-        keeps the stored value. Restart the app for changes to take effect.
+        keeps the stored value.
       </p>
     </div>
   );

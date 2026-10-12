@@ -38,10 +38,17 @@ export type Deployment = {
   build_finished_at: string | null;
   error_message: string | null;
   has_logs: boolean;
+  /** Claude's explanation of a failure, once someone asked for it. */
+  ai_diagnosis: AiDiagnosis | null;
+  /** While waiting on this server: builds ahead, and builds waiting in all. */
+  queue_position?: number | null;
+  queue_size?: number | null;
   /** The GitHub Actions run that built this, when it was built there. */
   ci_run_url: string | null;
   /** What started that run: a push to the repository, or the dashboard. */
   ci_trigger: "push" | "dashboard" | null;
+  /** Set when the build was skipped: this deployment runs that one's identical image. */
+  reused_from_id?: string | null;
 
   url: string | null;
   subdomain: string | null;
@@ -65,6 +72,15 @@ export type Deployment = {
 
   user_id?: string | null;
   user_email?: string | null;
+};
+
+export type AiDiagnosis = {
+  summary: string;
+  cause: string;
+  fix: string;
+  confidence: "high" | "medium" | "low";
+  model?: string;
+  created_at?: string;
 };
 
 export type DeploymentEvent = {
@@ -222,3 +238,36 @@ export function buildRepository(
 ): Promise<{ deployment_id: string; status: DeploymentStatus; target_label: string }> {
   return apiFetch(`/repos/${repoId}/build`, { method: "POST" });
 }
+
+export function diagnoseDeployment(id: string, refresh = false): Promise<AiDiagnosis> {
+  return apiFetch<AiDiagnosis>(`/deployments/${id}/diagnose${refresh ? "?refresh=true" : ""}`, {
+    method: "POST",
+  });
+}
+
+
+/* --- GitHub Actions progress -------------------------------------------- */
+
+export type CiStep = {
+  number: number;
+  name: string;
+  status: "queued" | "in_progress" | "completed" | string;
+  conclusion: "success" | "failure" | "skipped" | "cancelled" | string | null;
+  started_at: string | null;
+  completed_at: string | null;
+};
+
+/** Where a build running in GitHub Actions has got to, step by step. */
+export type CiProgress = {
+  status: "queued" | "in_progress" | "completed" | string | null;
+  conclusion: string | null;
+  html_url: string | null;
+  steps: CiStep[];
+  completed: number;
+  total: number;
+  current: string | null;
+  error?: string;
+};
+
+export const ciProgress = (id: string) => apiFetch<CiProgress>(`/deployments/${id}/ci-progress`);
+export const adminCiProgress = (id: string) => apiFetch<CiProgress>(`/admin/deployments/${id}/ci-progress`);

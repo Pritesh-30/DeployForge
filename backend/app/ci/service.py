@@ -46,7 +46,7 @@ from app.models.deployment import BuildMethod, Deployment, DeploymentStatus
 from app.models.event import EventLevel
 from app.models.repository import Repository
 from app.models.user import User
-from app.runtime import compose
+from app.runtime import compose, mirror
 from app.runtime import service as runtime
 from app.runtime.service import record
 
@@ -282,6 +282,13 @@ def _refusal(
         )
     if any(d.suspended_by_admin for d in siblings):
         return "An administrator has suspended this app."
+    # Only a push is refused: pressing Deploy is always a deliberate request.
+    if claims.get("event_name") != "workflow_dispatch" and not repository.auto_deploy:
+        return (
+            "Automatic deploys are turned off for this app, so this push was "
+            "not deployed. Turn them back on in the app's settings, or press "
+            "Deploy."
+        )
     return None
 
 
@@ -535,6 +542,42 @@ async def _after_build(
     if repository is None or user is None:
         return
 
+    log_file = Path(deployment.logs_ref or builder.log_path_for(deployment.id))
+    # Keep the images here, versioned by commit, and run them from here. The
+    # copy is its own stage — "Copy to registry" on the deployment page — so
+    # it is shown in progress and then as done, not silently folded into
+    # the build.
+    copying = settings.mirror_ci_images and any(mirror.mirror_target(r) for r in images.values())
+    if copying:
+        deployment.status = DeploymentStatus.PUSHING
+        await db.commit()
+        await record(
+            db, deployment.id, "push",
+            f"Copying {len(images)} image{'s' if len(images) != 1 else ''} from GitHub "
+            "into this server's registry.",
+            actor="github",
+        )
+    stored = await mirror.mirror_images(db, deployment.user_id, images, log_file)
+    if copying:
+        copied = [ref for key, ref in stored.items() if ref != images.get(key)]
+        if copied:
+            await record(
+                db, deployment.id, "push",
+                "Stored in the registry: " + ", ".join(copied),
+                level=EventLevel.SUCCESS, actor="github",
+            )
+        else:
+            await record(
+                db, deployment.id, "push",
+                "Could not copy the image into the registry; running it from GitHub "
+                "instead. The build log says why.",
+                level=EventLevel.WARNING, actor="github",
+            )
+    if "" in stored:
+        deployment.image_ref = stored[""]
+    kept = [original for key, original in images.items() if stored.get(key) != original]
+    images = stored
+
     try:
         if repository.is_multi_service:
             await builder.write_stack(
@@ -557,37 +600,11 @@ async def _after_build(
     deployment.build_finished_at = datetime.now(timezone.utc)
     await db.commit()
 
-    # Deploying is the point of the build: a push should end with the new
-    # version live, not with a button to press. A newer build that has already
-    # overtaken this one wins, though — it is what the student pushed last.
-    newer = (
-        await db.execute(
-            select(Deployment.id).where(
-                Deployment.repository_id == repository.id,
-                Deployment.created_at > deployment.created_at,
-                Deployment.status.in_([*_IN_FLIGHT, DeploymentStatus.BUILT]),
-            )
-        )
-    ).first()
-    if newer is not None:
-        await record(
-            db, deployment.id, "start",
-            "Not started: a newer build of this app is on its way.",
-        )
-        return
+    if kept:
+        await mirror.delete_from_github(db, deployment.user_id, kept, log_file)
 
-    try:
-        await runtime.start(db, deployment, repository, user, actor="github")
-    except AppError as exc:
-        # A failed start has already been recorded and explained by the
-        # runtime. A refusal before starting (quota, a block) leaves the build
-        # usable, and the student can start it once the reason is gone.
-        if deployment.status is DeploymentStatus.BUILT:
-            await record(
-                db, deployment.id, "start",
-                f"Built, but not started: {exc.message}",
-                level=EventLevel.WARNING,
-            )
+    # Deploying is the point of the build; see `runtime.go_live`.
+    await runtime.go_live(db, deployment, repository, user, actor="github")
 
 
 async def _prepare_compose_stack(

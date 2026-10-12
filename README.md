@@ -71,6 +71,40 @@ Three things follow, and all three are what a student would assume anyway:
 - **A failed redeploy does not take an app down.** While something is running,
   that is the app's state; the failure is in the history, where its log is.
 
+- **The same build is never made twice.** Every successful build records a
+  fingerprint of what went into it (commit, directory, build method, and for
+  buildpacks the build-time environment and builder). Redeploying a commit
+  that was already built with the same settings reuses that image and is
+  ready in seconds; the deployment is marked *instant*. **Redeploy ▾ → Rebuild
+  from scratch** builds anyway, for a `latest` base image or a package that
+  moved. See `backend/app/builder/reuse.py`.
+- **A finished build goes live by itself**, whether it was built on this
+  server or in GitHub Actions — unless a newer build has overtaken it.
+- **A release that crashes soon after going live is rolled back.** For
+  `AUTO_ROLLBACK_WINDOW_SECONDS` (default 300) after a version goes live, the
+  platform checks on its container every 10 seconds. If it stopped or is
+  crash-looping, the previous version's image is started again and the
+  crashed one is marked failed with its last output. A version started by a
+  rollback is never itself rolled back. See `backend/app/runtime/guardian.py`.
+- **Saving environment variables puts them into effect.** Each start records
+  a hash of every value (never the value). After a save, the Environment tab
+  asks what the change needs: nothing (the app is not running), a restart
+  (done automatically, in seconds), or a redeploy (a `NEXT_PUBLIC_*`-style
+  value was baked into a buildpack build — offered with one click). The tab
+  always shows whether the running app has the saved values.
+- **GitHub Actions builds show their steps.** The deployment page splits the
+  build stage of the progress bar into the workflow run's own steps, and the
+  app's banner names the step in progress.
+- **A restart never loses a build.** Builds live on the Redis queue, not in a
+  browser tab or a request: refreshing the page, closing it, or restarting the
+  backend does not cancel one. A build whose server stopped mid-way is put
+  back at the front of its lane within about 15 seconds (each worker keeps a
+  short-lived "alive" key), its row says *queued* with an event explaining
+  why, and it starts again by itself. Builds on GitHub Actions run on GitHub
+  and report back whenever they finish. Every page re-reads state from the
+  API on load, and logs replay from the start, so a reload shows exactly
+  where things are.
+
 Deleting an app removes its containers, its history and the connection, so the
 repository can be connected again. Deleting one deployment removes only that
 build from the history.
@@ -133,8 +167,8 @@ moment later.
 
 ## Requirements
 
-- **Docker Desktop** (or Docker Engine) — required. Runs PostgreSQL, the
-  registry, the router, and every deployed app.
+- **Docker Desktop** (or Docker Engine) — required. Runs PostgreSQL, Redis,
+  the registry, the router, and every deployed app.
 - **Python 3.12+**, **Node.js 20+**
 - **`pack` CLI 0.40+** — only for repositories with neither a Dockerfile nor a
   compose file. Everything else works without it.
@@ -143,7 +177,23 @@ moment later.
 
 ## 1. Infrastructure
 
-Four containers. Run these once; they restart with Docker afterwards.
+**On Windows, one command does sections 1, 3's migrations and 9:**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 up        # network, Postgres, Redis, registry, Traefik, migrations
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 backend   # frees port 8000 from a stale uvicorn, then runs it
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 frontend
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 status
+```
+
+`up` is safe to run any number of times: containers that exist are started,
+not recreated (no more `container name ... is already in use`), and Traefik is
+recreated only when its provider token differs from `TRAEFIK_PROVIDER_TOKEN`
+in `backend/.env` — the cause of `403 Forbidden` on
+`/internal/traefik/config`. `backend` stops only leftover `uvicorn app.main`
+processes holding port 8000, which Windows reports as `WinError 10013`.
+
+The manual steps follow. Five containers. Run these once; they restart with Docker afterwards.
 
 ```bash
 docker network create deployforge_edge
@@ -151,6 +201,10 @@ docker network create deployforge_edge
 
 ```bash
 docker run -d --name deployforge-db --restart unless-stopped -e POSTGRES_USER=deployforge -e POSTGRES_PASSWORD=deployforge -e POSTGRES_DB=deployforge -p 5433:5432 -v deployforge_pgdata:/var/lib/postgresql/data postgres:17
+```
+
+```bash
+docker run -d --name deployforge-redis --restart unless-stopped -p 127.0.0.1:6379:6379 -v deployforge_redis:/data redis:7-alpine redis-server --appendonly yes --save ""
 ```
 
 ```bash
@@ -168,7 +222,11 @@ PostgreSQL already on the host. The token in the Traefik command must match
 Traefik reaches the backend at `host.docker.internal`, which Docker Desktop
 provides. On Linux, add `--add-host=host.docker.internal:host-gateway`.
 
-Check all four are up:
+Redis holds the build queue, rate limits, metrics and cached GitHub
+responses. Nothing in it is the source of truth — the database is — but it is
+persisted (`--appendonly yes`) so queued builds survive a restart.
+
+Check all five are up:
 
 ```bash
 docker ps --filter name=deployforge
@@ -296,9 +354,10 @@ Open <http://localhost:3000>.
 
 ## 10. Verify
 
-- <http://localhost:8000/health> reports `"status":"ok"` and `"database":"ok"`.
-- Log in as the administrator → **Infrastructure**. Docker, Registry and Router
-  should be operational; Buildpacks too if you did step 2.
+- <http://localhost:8000/health> reports `"status":"ok"`, `"database":"ok"` and
+  `"redis":"ok"`.
+- Log in as the administrator → **Infrastructure**. Docker, Redis, Registry and
+  Router should be operational; Buildpacks too if you did step 2.
 - <http://localhost:8090> is the Traefik dashboard.
 
 ## 11. Tests
@@ -308,8 +367,9 @@ backend/.venv/Scripts/python -m pytest backend/tests/
 ```
 
 Tests run against the real database inside transactions that roll back, so they
-leave no rows behind. Docker and GitHub are stubbed; nothing is built, run or
-fetched.
+leave no rows behind. Redis is an in-process fake with Lua enabled, so the
+queue's atomic scripts run exactly as in production. Docker, GitHub and the
+Anthropic API are stubbed; nothing is built, run, fetched or paid for.
 
 CI (`.github/workflows/ci.yml`) runs the same tests against a fresh
 PostgreSQL, type-checks and lints the frontend, and builds both images on every
@@ -383,7 +443,9 @@ git push ──────> the same workflow starts by itself
                   push:  ghcr.io/<student>/<repo>/...:<commit>
                   report the result and the log ──> DeployForge
                         │
-                DeployForge pulls the image and replaces the running app
+                DeployForge pulls the image, stores it in its own registry
+                (versioned by commit), deletes GitHub's copy, and replaces
+                the running app with the stored version
 ```
 
 - **Every push to the connected branch redeploys the app.** Pushes to other
@@ -394,21 +456,70 @@ git push ──────> the same workflow starts by itself
   only accepts results for apps connected from that repository. The app's
   environment variables are handed to the run when it starts, masked in its
   log, and removed from the log copy the server keeps.
-- **Images belong to the student.** They are pushed to the student's own GitHub
-  container registry (private when the repository is) and pulled with their
-  GitHub token.
+- **Every version is kept here.** The run pushes to the student's GitHub
+  container registry — the one registry a workflow can push to with no secret
+  in the repository — and the server then copies the image into its own
+  registry (`localhost:5000/deployforge/<owner>/<repo>/<target>:<commit>`)
+  and runs it from there. Rollback therefore never depends on GitHub, and the
+  server does not pull from the internet to start a version.
+- **GitHub's copy is cleared.** Private packages count against a free GitHub
+  account's storage, so once the copy is stored the server deletes the
+  version it came from — only images the app's own builds pushed, and only
+  when the student granted `delete:packages`. Without that scope the copy is
+  left and the build log says how to allow cleanup. If copying fails for any
+  reason, the app simply runs from GitHub's copy instead.
 - The student's workflow file is a few lines that call
   `.github/workflows/deployforge-build.yml` **in this repository**, which
   must therefore be public and have that file on `main` (`CI_WORKFLOW`
   changes where it points).
 
-Students connect GitHub with three permissions: `repo`, `workflow` (to add the
-workflow file) and `read:packages` (to pull their images). Anyone who connected
+Students connect GitHub with four permissions: `repo`, `workflow` (to add the
+workflow file), `read:packages` (to pull their images) and `delete:packages`
+(to clear them from GitHub once stored). Anyone who connected
 before builds moved to Actions sees a **Reconnect GitHub** button under
 **Deploy new**.
 
-On a laptop the default stays `BUILD_BACKEND=local`: GitHub cannot call back
-to `localhost`, so builds run on the machine as before.
+On a laptop the default stays `BUILD_BACKEND=local`, and GitHub cannot reach
+`localhost` — so neither GitHub Actions builds nor push deploys work until the
+laptop has a public address. **One** ngrok tunnel (a free static domain) is
+enough, because the console forwards `/backend/*` to the API
+(`frontend/next.config.ts`):
+
+| Through `https://<NGROK_DOMAIN>` | Goes to |
+|---|---|
+| `/` | the console (port 3000), for showing the demo on any device |
+| `/backend/webhooks/github?app=<id>` | GitHub push webhooks |
+| `/backend/ci/runs…` | GitHub Actions asking what to build and reporting back |
+
+```powershell
+# backend/.env: NGROK_DOMAIN=<your static domain>   (once)
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 tunnel actions   # or "local"; keep it open
+powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1 backend          # restart the API
+```
+
+`tunnel` writes `PUBLIC_API_URL=https://<domain>/backend`, generates
+`GITHUB_WEBHOOK_SECRET` the first time, optionally sets `BUILD_BACKEND`, and
+runs `ngrok http 3000 --url=<domain>`. When the API starts it gives every app
+with push deploys on a GitHub webhook pointing at that address (re-pointing
+existing ones, so a changed address never leaves dead hooks), signed with the
+secret. `POST /admin/webhooks/sync` does the same on demand.
+
+A push then deploys, whichever backend builds:
+
+- **local** — the webhook queues a build on the laptop; it goes live when done.
+- **actions** — the first push (or Redeploy) commits the DeployForge workflow
+  to the repository and runs it; after that the workflow itself runs on each
+  push and the webhook stands aside, so nothing is built twice.
+
+A push to another branch, to another app's folder in a monorepo, with push
+deploys turned off, or that only changes the workflow file does not deploy —
+the reason is in the webhook's **Recent deliveries** on GitHub.
+
+While the tunnel is open the API is reachable from the internet. Every route
+still needs a login, webhook deliveries need the HMAC signature, the router's
+endpoint needs its token, and build callbacks need a GitHub-signed token for
+the app's own repository. GitHub sign-in still returns to the OAuth app's
+callback URL (`localhost:3000`), so sign in on the laptop.
 
 ---
 
@@ -416,11 +527,30 @@ to `localhost`, so builds run on the machine as before.
 
 ### As a student
 
-Sign up → **Deploy new** → **Authorize GitHub** → pick a repository → pick what
-inside it to deploy → **Build and deploy** → **Start**.
+Sign up → **New app** → **Connect GitHub** → pick a repository → tick what
+inside it to deploy (optionally paste a `.env`) → **Deploy**.
 
-That creates an app. Opening it shows its URL, its environment variables and
-every build it has had; **Redeploy** builds it again from the latest commit.
+The sidebar has **Overview** (live apps, build health, recent activity),
+**Apps**, **Deployments** (every build across every app), **Activity**,
+**Usage & limits** and **Settings**. `Ctrl K` jumps to any page or app by
+typing part of its name.
+
+Each app has eight tabs:
+
+| Tab | What it is for |
+|---|---|
+| **Overview** | Uptime, response time, CPU and memory now; the production deployment; build health; recent deployments with one-click rollback |
+| **Code** | The repository the way GitHub shows it — file tree, highlighted files, READMEs, commit history, every branch. Press `t` to jump to a file |
+| **Deployments** | Every build. **Changes** shows the commits and diff since the previous one; **Roll back** runs an earlier version's image again in seconds |
+| **Logs** | Runtime and build logs, streamed live, with filtering, wrapping and download |
+| **Metrics** | CPU, memory, response time and network over 1h / 6h / 24h |
+| **Activity** | Everything that happened to the app, including anything an administrator did |
+| **Environment** | Variables, encrypted at rest and injected at build and run time |
+| **Settings** | The branch it deploys from, push deploys on or off, its address and HTTPS state, delete |
+
+A redeploy keeps the app's address: the hostname belongs to the app, not to
+a build of it. The new version replaces the old one only once it has started
+cleanly, so a broken redeploy never takes a working app down.
 
 The build runs in the background and its log streams on the deployment page.
 The first buildpack build on a machine downloads a large builder image, so it
@@ -440,20 +570,39 @@ matched against known failures, so an unreachable database or a rejected
 password is named as such instead of "exit code 1". An unrecognized crash keeps
 the raw detail — a confident wrong explanation would be worse than none.
 
+**Explain with AI.** With `ANTHROPIC_API_KEY` set, a failed deployment offers
+*Explain this failure*: Claude reads the end of the log with what the platform
+knows about the app and returns the cause, the fix, and how confident it is.
+It runs only when asked (each call costs money), the answer is stored so
+asking twice is free, and it is rate limited per account.
+
 Environment variables are encrypted at rest and injected at build and run time.
 Restart the app for changes to take effect.
 
 ### As an administrator
 
 Administrators do not deploy. Their navigation has no GitHub connection and no
-deploy flow at all — four screens instead:
+deploy flow at all:
 
-- **Overview** — activity, build success rate, framework and build-method mix,
-  busiest accounts, and anything needing attention.
-- **Students** — every account, its quota, and the block/disable controls.
-- **Projects** — every deployment on the platform, with suspend and delete.
-- **Infrastructure** — live service checks, what each one does, and what breaks
-  without it.
+- **Overview** — service health, machine CPU and memory over time, build
+  success, the queue, and what is failing or suspended right now.
+- **Apps** — every student's app with live usage. Start, stop and restart
+  from the list; open one for the same tabs its owner has (minus the code and
+  environment) plus **Redeploy**, **Roll back**, **Suspend** and **Resume**.
+- **Students** — every account: quota, deploy rights, enable/disable. Each
+  has a page with their apps, usage, activity and every admin action on them.
+- **Build queue** — the fair scheduler made visible: build slots, each
+  student's lane, the exact order builds will run in, retries backing off.
+  **Builds at once** is adjustable here (− / +, up to `BUILD_CONCURRENCY_MAX`,
+  default 8). It takes effect within seconds without a restart and survives
+  one; lowering it lets running builds finish. `BUILD_CONCURRENCY` is only
+  the starting value. About one build per two CPU cores keeps each build fast.
+- **Infrastructure** — service checks, load over time, every container with
+  live usage and the app and student it belongs to, Docker's disk use.
+- **Audit log** — every administrator action, who took it and on whose app.
+
+An administrator's start bypasses the student's quota and deploy block (they
+set those), but not a suspension — lifting that is a separate, recorded act.
 
 ---
 
@@ -462,18 +611,24 @@ deploy flow at all — four screens instead:
 ```
 backend/
   app/
-    api/          route handlers: apps, deployments, admin, the router's config
+    api/          route handlers: apps, deployments, admin, admin operations
     auth/         JWT issuing, hashing, dependencies
-    builder/      docker build, buildpacks, compose preparation, registry push
+    builder/      docker build, buildpacks, compose, the build trigger, AI diagnosis
     ci/           GitHub Actions builds: the workflow file, run identity, callbacks
+    core/         Redis client, GCRA rate limiting, errors, encryption
     detection/    pure repository analysis — no network, no database
-    github/       OAuth, API client, tarball download
-    models/       SQLAlchemy tables
-    runtime/      container and stack lifecycle, naming, ports, reconciliation
+    github/       OAuth, API client, tarball download, the cached code browser
+    metrics/      sampler, Redis-stream time series, LTTB downsampling
+    models/       SQLAlchemy tables, including the audit log
+    queue/        the fair build queue: Lua scripts, workers, fairness maths
+    runtime/      container lifecycle, naming, ports, log streams, image mirroring
+    services/     app views and auditing shared by student and admin routes
+    worker.py     run the queue's workers as their own process
 frontend/
-  app/            routes: landing, auth, apps and their builds, admin console
-  components/     design system (ui.tsx), charts, feature components
-  lib/            typed API client
+  app/(console)/  every signed-in page; the layout resolves the session once
+  components/     design system (ui.tsx), charts, log viewer, code browser,
+                  app screens shared by student and admin (components/app)
+  lib/            typed API client, the owner/admin app adapters, fuzzy search
 ```
 
 ### Notes for whoever works on this next
@@ -489,6 +644,33 @@ frontend/
   running. An app's builds all share its hostname, so an outright UNIQUE
   constraint would reject the second one; what must never happen is two of them
   serving that name at once, and that is what the index says.
+- **The build queue is fair, durable and atomic.** One FIFO per student and a
+  ring of students with work; a worker takes one job from the head of the ring
+  and moves that student to the back (round-robin, i.e. deficit round-robin
+  with a quantum of one). A student's wait is bounded by the number of
+  *students* ahead, not jobs. Every state change is a single Lua script, so
+  two workers can never take one job. Workers hold a lease and renew it on a
+  heartbeat; a lapsed lease puts the job back at the front of its lane.
+  Only transient failures (network, GitHub 5xx, Docker not answering) are
+  retried, with exponential backoff and full jitter. Queue position is
+  computed in O(students) from the ring, and tested against a brute-force
+  simulation over random queues. See `queue/fairness.py`.
+- **Rate limits use GCRA**: one timestamp per account, checked and updated in
+  one Lua call, so it is exact across several API processes. It fails open —
+  refusing everyone because the limiter's store is down protects nobody.
+- **Metrics live in Redis streams.** A stream id is the millisecond it was
+  written, so a stream is already a time-ordered log with range queries by
+  time and trimming by length. Charts are downsampled with LTTB, which keeps
+  the spikes that averaging would flatten.
+- **The code browser caches by content.** Trees and blobs at a commit SHA never
+  change, so they are cached for a week; only "which commit is `main` now?"
+  goes to GitHub, and that is held for 30 seconds.
+- **Suspension applies to the app, not one deployment.** It is stored on the
+  deployment an administrator stopped, but every start and build checks the
+  whole app — otherwise redeploying would produce a fresh, unsuspended row.
+- **Logs stream over SSE read with `fetch`**, not `EventSource`, because
+  `EventSource` cannot send the Authorization header and a token in the URL
+  would land in every access log.
 - **The routing table is never returned empty.** Traefik keeps its previous
   configuration when handed an empty one, so a sentinel route is always
   included. Without it, stopping the last running app leaves its URL pointing

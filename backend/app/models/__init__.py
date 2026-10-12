@@ -5,6 +5,7 @@ Importing this package imports every model, which registers all four tables on
 `Base.metadata` — that is what Alembic autogenerate reads.
 """
 
+from app.models.audit import AuditEvent
 from app.models.base import Base, TimestampMixin, UUIDMixin
 from app.models.deployment import BuildMethod, Deployment, DeploymentStatus
 from app.models.environment import EnvironmentVariable
@@ -28,4 +29,5 @@ __all__ = [
     "DeploymentStatus",
     "DeploymentEvent",
     "EventLevel",
+    "AuditEvent",
 ]
